@@ -57,7 +57,7 @@ jobs:
 
       - name: Add Alire indexes
         run: |
-          alr -n index --add --name flyology --url git+https://github.com/flyology-ada/alire-index.git
+          alr -n index --add git+https://github.com/flyology-ada/alire-index.git --name flyology
 
       - name: Select latest toolchain (non-interactive)
         #  Bare names resolve to the newest available releases, so CI
@@ -105,7 +105,7 @@ jobs:
 
       - name: Add Alire indexes
         run: |
-          alr -n index --add --name flyology --url git+https://github.com/flyology-ada/alire-index.git
+          alr -n index --add git+https://github.com/flyology-ada/alire-index.git --name flyology
 
       - name: Select latest toolchain (non-interactive)
         run: alr -n toolchain --select gnat_native gprbuild
