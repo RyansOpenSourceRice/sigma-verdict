@@ -1,170 +1,135 @@
 --  Copyright 2026 Ryan
 --  SPDX-License-Identifier: Apache-2.0
---
---  Body of the deterministic Sigma detection evaluator.
---
---  All three matchers are linear scans with no recursion, no access
---  types and no exceptions; Eval_Node is the only recursion and it
---  carries an explicit Fuel counter with a Decreases contract so the
---  termination proof is by fuel, not by tree shape. Every load-time
---  rejection lives in the boundary; here every unknown surface
---  (Mod_Unknown, N_Near/N_Count, out-of-range references) maps to an
---  explicit Error_* result, never to False.
 
 package body Sigma_Verdict.Engine with SPARK_Mode is
 
-   ----------------
-   --  Textuals --
-   ----------------
+   ------------------
+   --  Constructors --
+   ------------------
 
    function To_Field_Name (S : String) return Field_Result is
+      R : Field_Result;
    begin
       if S'Length > Max_Field_Length then
-         return (Ok => False, Value => <>);
-      end if;
-      declare
-         R : Field_Result := (Ok => True, Value => <>);
-      begin
-         R.Value.Length := S'Length;
-         if S'Length > 0 then
-            R.Value.Data (1 .. S'Length) := S;
-         end if;
          return R;
-      end;
+      end if;
+      R.Ok := True;
+      R.Value.Length := S'Length;
+      for I in 1 .. S'Length loop
+         pragma Loop_Invariant (R.Value.Length = S'Length);
+         R.Value.Data (I) := S (S'First + (I - 1));
+      end loop;
+      return R;
    end To_Field_Name;
 
    function To_Value_Text (S : String) return Value_Result is
+      R : Value_Result;
    begin
       if S'Length > Max_Value_Length then
-         return (Ok => False, Value => <>);
-      end if;
-      declare
-         R : Value_Result := (Ok => True, Value => <>);
-      begin
-         R.Value.Length := S'Length;
-         if S'Length > 0 then
-            R.Value.Data (1 .. S'Length) := S;
-         end if;
          return R;
-      end;
+      end if;
+      R.Ok := True;
+      R.Value.Length := S'Length;
+      for I in 1 .. S'Length loop
+         pragma Loop_Invariant (R.Value.Length = S'Length);
+         R.Value.Data (I) := S (S'First + (I - 1));
+      end loop;
+      return R;
    end To_Value_Text;
 
    function To_Event_Text (S : String) return Event_Text_Result is
+      R : Event_Text_Result;
    begin
       if S'Length > Max_Event_Value_Length then
-         return (Ok => False, Value => <>);
-      end if;
-      declare
-         R : Event_Text_Result := (Ok => True, Value => <>);
-      begin
-         R.Value.Length := S'Length;
-         if S'Length > 0 then
-            R.Value.Data (1 .. S'Length) := S;
-         end if;
          return R;
-      end;
+      end if;
+      R.Ok := True;
+      R.Value.Length := S'Length;
+      for I in 1 .. S'Length loop
+         pragma Loop_Invariant (R.Value.Length = S'Length);
+         R.Value.Data (I) := S (S'First + (I - 1));
+      end loop;
+      return R;
    end To_Event_Text;
 
    function To_Pattern (S : String) return Pattern_Result is
+      R : Pattern_Result;
    begin
       if S'Length > Max_Pattern_Length then
-         return (Ok => False, Value => <>);
-      end if;
-      declare
-         R : Pattern_Result := (Ok => True, Value => <>);
-      begin
-         R.Value.Length := S'Length;
-         if S'Length > 0 then
-            R.Value.Data (1 .. S'Length) := S;
-         end if;
          return R;
-      end;
+      end if;
+      R.Ok := True;
+      R.Value.Length := S'Length;
+      for I in 1 .. S'Length loop
+         pragma Loop_Invariant (R.Value.Length = S'Length);
+         R.Value.Data (I) := S (S'First + (I - 1));
+      end loop;
+      return R;
    end To_Pattern;
 
    function Image_Of (F : Field_Name) return String is
-     (if F.Length = 0 then "" else F.Data (1 .. F.Length));
-
-   function To_Lower_Char (C : Character) return Character is
-     (if C in 'A' .. 'Z'
-      then Character'Val (Character'Pos (C) + 32)
-      else C);
-
-   function Images_Equal (A : Field_Name; S : String) return Boolean is
-      (A.Length = S'Length
-       and then (for all I in 1 .. A.Length =>
-                    A.Data (I) = S (S'First + I - 1)));
-
-   function Has_Prefix (Name, Prefix : Field_Name) return Boolean is
-   begin
-      if Prefix.Length = 0 then
-         return True;
-      end if;
-      if Name.Length < Prefix.Length then
-         return False;
-      end if;
-      for I in 1 .. Prefix.Length loop
-         if Name.Data (I) /= Prefix.Data (I) then
-            return False;
-         end if;
-      end loop;
-      return True;
-   end Has_Prefix;
+     (F.Data (1 .. F.Length));
 
    -----------------
    --  Modifiers --
    -----------------
 
-   function Modifier_Image (M : Modifier_Kind) return String is
-     (case M is
-        when Mod_None       => "",
-        when Mod_Contains   => "contains",
-        when Mod_Startswith => "startswith",
-        when Mod_Endswith   => "endswith",
-        when Mod_Re         => "re",
-        when Mod_Re_I       => "re/i",
-        when Mod_Re_M       => "re/m",
-        when Mod_Re_S       => "re/s",
-        when Mod_Wildcard   => "windash",
-        when Mod_Windash    => "windash-alias",
-        when Mod_Wide       => "wide",
-        when Mod_UTF16LE    => "utf16le",
-        when Mod_UTF16BE    => "utf16be",
-        when Mod_Base64     => "base64",
-        when Mod_Base64Offset => "base64offset",
-        when Mod_Cased      => "cased",
-        when Mod_All        => "all",
-        when Mod_Exists     => "exists",
-        when Mod_Fieldref   => "fieldref",
-        when Mod_Expand     => "expand",
-        when Mod_GT         => "gt",
-        when Mod_GTE        => "gte",
-        when Mod_LT         => "lt",
-        when Mod_LTE        => "lte",
-        when Mod_CIDR       => "cidr",
-        when Mod_Unknown    => "?");
+   function Same_Word (A, B : String) return Boolean is
+     (A'Length = B'Length
+      and then (for all I in 0 .. A'Length - 1 =>
+                  A (A'First + I) = B (B'First + I))); 
 
    function Parse_Modifier (Token : String) return Modifier_Kind is
-      P_Norm   : String (1 .. Token'Length);
-      P_Image  : Field_Name;
-      P_Result : Field_Result;
    begin
-      for I in Token'Range loop
-         P_Norm (I - Token'First + 1) := To_Lower_Char (Token (I));
-      end loop;
-      P_Result := To_Field_Name (P_Norm);
-      if P_Result.Ok then
-         P_Image := P_Result.Value;
-         for M in Modifier_Kind loop
-            declare
-               Expected_Image : constant String := Modifier_Image (M);
-            begin
-               if Images_Equal (P_Image, Expected_Image) then
-                  return M;
-               end if;
-            end;
-         end loop;
+      if Same_Word (Token, "contains") then
+         return Mod_Contains;
+      elsif Same_Word (Token, "startswith") then
+         return Mod_Startswith;
+      elsif Same_Word (Token, "endswith") then
+         return Mod_Endswith;
+      elsif Same_Word (Token, "re") then
+         return Mod_Re;
+      elsif Same_Word (Token, "re+i") or else Same_Word (Token, "i") then
+         return Mod_Re_I;
+      elsif Same_Word (Token, "re+m") or else Same_Word (Token, "m") then
+         return Mod_Re_M;
+      elsif Same_Word (Token, "re+s") or else Same_Word (Token, "s") then
+         return Mod_Re_S;
+      elsif Same_Word (Token, "windash") then
+         return Mod_Windash;
+      elsif Same_Word (Token, "wide") then
+         return Mod_Wide;
+      elsif Same_Word (Token, "utf16le") then
+         return Mod_UTF16LE;
+      elsif Same_Word (Token, "utf16be") then
+         return Mod_UTF16BE;
+      elsif Same_Word (Token, "base64") then
+         return Mod_Base64;
+      elsif Same_Word (Token, "base64offset") then
+         return Mod_Base64Offset;
+      elsif Same_Word (Token, "cased") then
+         return Mod_Cased;
+      elsif Same_Word (Token, "all") then
+         return Mod_All;
+      elsif Same_Word (Token, "exists") then
+         return Mod_Exists;
+      elsif Same_Word (Token, "fieldref") then
+         return Mod_Fieldref;
+      elsif Same_Word (Token, "expand") then
+         return Mod_Expand;
+      elsif Same_Word (Token, "gt") then
+         return Mod_GT;
+      elsif Same_Word (Token, "gte") then
+         return Mod_GTE;
+      elsif Same_Word (Token, "lt") then
+         return Mod_LT;
+      elsif Same_Word (Token, "lte") then
+         return Mod_LTE;
+      elsif Same_Word (Token, "cidr") then
+         return Mod_CIDR;
+      else
+         return Mod_Unknown;
       end if;
-      return Mod_Unknown;
    end Parse_Modifier;
 
    procedure Add_Modifier
@@ -183,6 +148,7 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
    function Chain_Supported (Set : Modifier_Set) return Boolean is
    begin
       for I in 1 .. Set.Count loop
+         pragma Loop_Invariant (Set.Count <= Max_Modifiers_Per_Field);
          if not Is_Supported_Modifier (Set.Items (I)) then
             return False;
          end if;
@@ -194,379 +160,381 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
    --  Matching --
    ----------------
 
-   --  All three matchers fold ASCII case ('A'..'Z' + 32) inline, per
-   --  the Sigma specification: matching is case-insensitive unless
-   --  the `cased` modifier (Phase 2, Unsupported) is present.
+   function Fold (C : Character) return Character is
+     (if C in 'A' .. 'Z'
+      then Character'Val (Character'Pos (C) + 32)
+      else C);
 
-   function Match_Exact (V : Value_Text; E : Event_Value) return Boolean is
-   begin
-      if E.Kind /= V_Text then
-         return False;
-      end if;
-      if V.Length /= E.Text_Value.Length then
-         return False;
-      end if;
-      for I in 1 .. V.Length loop
-         if To_Lower_Char (V.Data (I))
-           /= To_Lower_Char (E.Text_Value.Data (I))
-         then
-            return False;
-         end if;
-      end loop;
-      return True;
-   end Match_Exact;
+   function Equal_Folded (A, B : String) return Boolean is
+     (A'Length = B'Length
+      and then (for all I in 0 .. A'Length - 1 =>
+                  Fold (A (A'First + I)) = Fold (B (B'First + I))));
 
-   function Match_Contains (V : Value_Text; E : Event_Value) return Boolean is
+   function Same_Bytes (A, B : String) return Boolean is
+     (A'Length = B'Length
+      and then (for all I in 0 .. A'Length - 1 =>
+                  A (A'First + I) = B (B'First + I)));
+
+   function Field_Equal (A, B : Field_Name) return Boolean is
+     (A.Length = B.Length
+      and then Same_Bytes (A.Data (1 .. A.Length), B.Data (1 .. B.Length)));
+
+   function Contains_At (Haystack, Needle : String) return Boolean is
+      Match : Boolean;
    begin
-      if E.Kind /= V_Text then
-         return False;
-      end if;
-      if V.Length = 0 then
+      if Needle'Length = 0 then
          return True;
       end if;
-      if E.Text_Value.Length < V.Length then
+      if Needle'Length > Haystack'Length then
          return False;
       end if;
-      for Start in 1 .. E.Text_Value.Length - V.Length + 1 loop
-         declare
-            Found : Boolean := True;
-         begin
-            for J in 1 .. V.Length loop
-               if To_Lower_Char (E.Text_Value.Data (Start + J - 1))
-                 /= To_Lower_Char (V.Data (J))
-               then
-                  Found := False;
-                  exit;
-               end if;
-            end loop;
-            if Found then
-               return True;
+      for Start in 0 .. Haystack'Length - Needle'Length loop
+         Match := True;
+         for K in 0 .. Needle'Length - 1 loop
+            pragma Loop_Invariant (Start <= Haystack'Length - Needle'Length);
+            pragma Loop_Invariant (K <= Needle'Length - 1);
+            if Fold (Haystack (Haystack'First + Start + K)) /=
+              Fold (Needle (Needle'First + K))
+            then
+               Match := False;
+               exit;
             end if;
-         end;
+         end loop;
+         if Match then
+            return True;
+         end if;
+         pragma Loop_Invariant (Needle'Length <= Haystack'Length);
       end loop;
       return False;
-   end Match_Contains;
+   end Contains_At;
 
-   function Match_Startswith (V : Value_Text; E : Event_Value) return Boolean is
+   function Starts_With_At (Haystack, Needle : String) return Boolean is
    begin
-      if E.Kind /= V_Text then
-         return False;
-      end if;
-      if V.Length = 0 then
+      if Needle'Length = 0 then
          return True;
       end if;
-      if E.Text_Value.Length < V.Length then
+      if Needle'Length > Haystack'Length then
          return False;
       end if;
-      for I in 1 .. V.Length loop
-         if To_Lower_Char (E.Text_Value.Data (I))
-           /= To_Lower_Char (V.Data (I))
+      for K in 0 .. Needle'Length - 1 loop
+         pragma Loop_Invariant (Needle'Length <= Haystack'Length);
+         if Fold (Haystack (Haystack'First + K)) /=
+           Fold (Needle (Needle'First + K))
          then
             return False;
          end if;
       end loop;
       return True;
-   end Match_Startswith;
+   end Starts_With_At;
 
-   function Match_Endswith (V : Value_Text; E : Event_Value) return Boolean is
-      Base : Natural;
+   function Ends_With_At (Haystack, Needle : String) return Boolean is
+      Offset : constant Natural := Haystack'Length - Needle'Length;
    begin
-      if E.Kind /= V_Text then
-         return False;
-      end if;
-      if V.Length = 0 then
+      if Needle'Length = 0 then
          return True;
       end if;
-      if E.Text_Value.Length < V.Length then
+      if Needle'Length > Haystack'Length then
          return False;
       end if;
-      Base := E.Text_Value.Length - V.Length;
-      for I in 1 .. V.Length loop
-         if To_Lower_Char (E.Text_Value.Data (Base + I))
-           /= To_Lower_Char (V.Data (I))
+      for K in 0 .. Needle'Length - 1 loop
+         pragma Loop_Invariant (Offset = Haystack'Length - Needle'Length);
+         if Fold (Haystack (Haystack'First + Offset + K)) /=
+           Fold (Needle (Needle'First + K))
          then
             return False;
          end if;
       end loop;
       return True;
-   end Match_Endswith;
+   end Ends_With_At;
 
-   --  Dispatch on the LAST supported matcher in the chain: Sigma
-   --  applies value modifiers left to right, so the final contains /
-   --  startswith / endswith decides the comparison; exact equality is
-   --  the empty-chain case. Any unsupported element was already
-   --  rejected by Chain_Supported before we get here.
-   function Match_Field
-     (C : Field_Constraint; E : Event_Value) return Boolean
-   is
-      Last : Modifier_Kind := Mod_None;
+   function Has_Prefix (Name, Prefix : Field_Name) return Boolean is
    begin
-      for I in 1 .. C.Modifiers.Count loop
-         if C.Modifiers.Items (I) in
-           Mod_Contains | Mod_Startswith | Mod_Endswith
-         then
-            Last := C.Modifiers.Items (I);
-         end if;
-      end loop;
-      case C.Expected.Kind is
-         when E_Text =>
-            case Last is
-               when Mod_None =>
-                  return Match_Exact (C.Expected.Single, E);
-               when Mod_Contains =>
-                  return Match_Contains (C.Expected.Single, E);
-               when Mod_Startswith =>
-                  return Match_Startswith (C.Expected.Single, E);
-               when Mod_Endswith =>
-                  return Match_Endswith (C.Expected.Single, E);
-               when others =>
-                  return False;
-            end case;
-         when E_Text_List =>
-            for I in 1 .. C.Expected.Count loop
-               case Last is
-                  when Mod_None =>
-                     if Match_Exact (C.Expected.Items (I), E) then
-                        return True;
-                     end if;
-                  when Mod_Contains =>
-                     if Match_Contains (C.Expected.Items (I), E) then
-                        return True;
-                     end if;
-                  when Mod_Startswith =>
-                     if Match_Startswith (C.Expected.Items (I), E) then
-                        return True;
-                     end if;
-                  when Mod_Endswith =>
-                     if Match_Endswith (C.Expected.Items (I), E) then
-                        return True;
-                     end if;
-                  when others =>
-                     return False;
-               end case;
-            end loop;
-            return False;
-         when E_Int =>
-            if E.Kind /= V_Int then
-               return False;
-            end if;
-            return E.Int_Value = C.Expected.Int_Value;
-         when E_Int_List =>
-            if E.Kind /= V_Int then
-               return False;
-            end if;
-            for I in 1 .. C.Expected.Int_Count loop
-               if E.Int_Value = C.Expected.Ints (I) then
-                  return True;
-               end if;
-            end loop;
-            return False;
-         when E_Pattern =>
-            --  `re` / wildcard bodies are opaque until Phase 2.
-            return False;
-      end case;
-   end Match_Field;
+      if Prefix.Length = 0 then
+         return True;
+      end if;
+      if Prefix.Length > Name.Length then
+         return False;
+      end if;
+      return Same_Bytes
+        (Name.Data (1 .. Prefix.Length), Prefix.Data (1 .. Prefix.Length));
+   end Has_Prefix;
 
-   ----------------
-   --  Selection --
-   ----------------
-
-   function Find_Event_Field
+   function Find_Field
      (Event : Event_Record; Name : Field_Name) return Natural
    is
    begin
       for I in 1 .. Event.Count loop
-         if Image_Of (Event.Fields (I).Name)
-           = Image_Of (Name)
-         then
+         pragma Loop_Invariant (Event.Count <= Max_Event_Fields);
+         if Field_Equal (Event.Fields (I).Name, Name) then
             return I;
          end if;
       end loop;
       return 0;
-   end Find_Event_Field;
+   end Find_Field;
 
-   function Eval_Selection
+   --  Match one expected text against one haystack under the chain's
+   --  single matcher. The chain holds at most one matching semantic in
+   --  Phase 1 (the boundary rejects empty-vs-multiple matcher chains
+   --  beyond exact equality); the LAST matcher token wins if several
+   --  are present, and evaluation stays deterministic either way.
+   function Text_Matches
+     (Haystack : String; Needle : String; Set : Modifier_Set) return Boolean
+   is
+      Kind : Modifier_Kind := Mod_None;
+   begin
+      for I in 1 .. Set.Count loop
+         pragma Loop_Invariant (Set.Count <= Max_Modifiers_Per_Field);
+         if Set.Items (I) in Mod_Contains | Mod_Startswith | Mod_Endswith then
+            Kind := Set.Items (I);
+         end if;
+      end loop;
+      case Kind is
+         when Mod_Contains =>
+            return Contains_At (Haystack, Needle);
+         when Mod_Startswith =>
+            return Starts_With_At (Haystack, Needle);
+         when Mod_Endswith =>
+            return Ends_With_At (Haystack, Needle);
+         when others =>
+            return Equal_Folded (Haystack, Needle);
+      end case;
+   end Text_Matches;
+
+   function Match_Field
+     (C : Field_Constraint; Event : Event_Record) return Eval_Result
+   is
+      Slot : constant Natural := Find_Field (Event, C.Field);
+   begin
+      if not Chain_Supported (C.Modifiers) then
+         return (Matched => False, Error => Error_Unsupported_Modifier);
+      end if;
+      if C.Expected.Kind = E_Pattern then
+         return (Matched => False, Error => Error_Unsupported_Modifier);
+      end if;
+      if Slot = 0 then
+         --  Absent field: no match, no error (standard Sigma semantics).
+         return (Matched => False, Error => Error_None);
+      end if;
+      declare
+         EV : constant Event_Value := Event.Fields (Slot).Value;
+      begin
+         case C.Expected.Kind is
+            when E_Int =>
+               if EV.Kind = V_Int and then EV.Int_Value = C.Expected.Int_Value then
+                  return (Matched => True, Error => Error_None);
+               end if;
+               return (Matched => False, Error => Error_None);
+            when E_Int_List =>
+               if EV.Kind /= V_Int then
+                  return (Matched => False, Error => Error_None);
+               end if;
+               for I in 1 .. C.Expected.Int_Count loop
+                  pragma Loop_Invariant
+                    (C.Expected.Int_Count <= Max_Values_Per_Sel);
+                  if EV.Int_Value = C.Expected.Ints (I) then
+                     return (Matched => True, Error => Error_None);
+                  end if;
+               end loop;
+               return (Matched => False, Error => Error_None);
+            when E_Text =>
+               if EV.Kind /= V_Text then
+                  return (Matched => False, Error => Error_None);
+               end if;
+               if Text_Matches
+                 (EV.Text_Value.Data (1 .. EV.Text_Value.Length),
+                  C.Expected.Single.Data (1 .. C.Expected.Single.Length),
+                  C.Modifiers)
+               then
+                  return (Matched => True, Error => Error_None);
+               end if;
+               return (Matched => False, Error => Error_None);
+            when E_Text_List =>
+               if EV.Kind /= V_Text then
+                  return (Matched => False, Error => Error_None);
+               end if;
+               for I in 1 .. C.Expected.Count loop
+                  pragma Loop_Invariant
+                    (C.Expected.Count <= Max_Values_Per_Sel);
+                  if Text_Matches
+                    (EV.Text_Value.Data (1 .. EV.Text_Value.Length),
+                     C.Expected.Items (I).Data
+                       (1 .. C.Expected.Items (I).Length),
+                     C.Modifiers)
+                  then
+                     return (Matched => True, Error => Error_None);
+                  end if;
+               end loop;
+               return (Matched => False, Error => Error_None);
+            when E_Pattern =>
+               return (Matched => False, Error => Error_Unsupported_Modifier);
+         end case;
+      end;
+   end Match_Field;
+
+   function Match_Selection
      (Sel : Selection; Event : Event_Record) return Eval_Result
    is
    begin
       for I in 1 .. Sel.Field_Count loop
+         pragma Loop_Invariant (Sel.Field_Count <= Max_Fields_Per_Sel);
          declare
-            C   : Field_Constraint renames Sel.Fields (I);
-            Idx : constant Natural := Find_Event_Field (Event, C.Field);
+            R : constant Eval_Result := Match_Field (Sel.Fields (I), Event);
          begin
-            if not Chain_Supported (C.Modifiers) then
-               return (Matched => False,
-                       Error   => Error_Unsupported_Modifier);
+            if R.Error /= Error_None then
+               return R;
             end if;
-            if C.Expected.Kind = E_Pattern then
-               return (Matched => False,
-                       Error   => Error_Unsupported_Modifier);
-            end if;
-            if Idx = 0 then
-               return (Matched => False, Error => Error_None);
-            end if;
-            if not Match_Field (C, Event.Fields (Idx).Value) then
+            if not R.Matched then
                return (Matched => False, Error => Error_None);
             end if;
          end;
       end loop;
+      --  A selection with zero fields cannot match; the boundary
+      --  rejects such rules at load, this is defence in depth.
+      if Sel.Field_Count = 0 then
+         return (Matched => False, Error => Error_None);
+      end if;
       return (Matched => True, Error => Error_None);
-   end Eval_Selection;
-
-   ----------------
-   --  Condition --
-   ----------------
+   end Match_Selection;
 
    function Eval_Node
-     (Rule  : Compiled_Rule;
-      Event : Event_Record;
-      Idx   : Positive;
-      Fuel  : Natural) return Eval_Result
+     (Rule : Compiled_Rule; Event : Event_Record; Idx : Positive;
+      Fuel : Natural)
+      return Eval_Result
    with Subprogram_Variant => (Decreases => Fuel)
    is
-      N : Condition_Node renames Rule.Nodes (Idx);
    begin
       if Fuel = 0 then
+         --  Cyclic node graph: fail closed instead of recursing forever.
          return (Matched => False, Error => Error_Invalid_Rule);
       end if;
-      case N.Kind is
-         when N_Ref =>
-            if N.Sel_Index < 1 or else N.Sel_Index > Rule.Sel_Count then
-               return (Matched => False, Error => Error_Invalid_Rule);
-            end if;
-            return Eval_Selection (Rule.Selections (N.Sel_Index), Event);
-         when N_Not =>
-            if N.Child < 1 or else N.Child > Rule.Node_Count then
-               return (Matched => False, Error => Error_Invalid_Rule);
-            end if;
-            declare
-               Inner : constant Eval_Result :=
-                 Eval_Node (Rule, Event, N.Child, Fuel - 1);
-            begin
-               if Inner.Error /= Error_None then
-                  return Inner;
-               end if;
-               return (Matched => not Inner.Matched, Error => Error_None);
-            end;
-         when N_And =>
-            if N.Left < 1 or else N.Left > Rule.Node_Count
-              or else N.Right < 1 or else N.Right > Rule.Node_Count
-            then
-               return (Matched => False, Error => Error_Invalid_Rule);
-            end if;
-            declare
-               L : constant Eval_Result :=
-                 Eval_Node (Rule, Event, N.Left, Fuel - 1);
-               R : constant Eval_Result :=
-                 Eval_Node (Rule, Event, N.Right, Fuel - 1);
-            begin
-               if L.Error /= Error_None then
-                  return L;
-               end if;
-               if R.Error /= Error_None then
-                  return R;
-               end if;
-               return (Matched => L.Matched and R.Matched,
-                       Error   => Error_None);
-            end;
-         when N_Or =>
-            if N.Left < 1 or else N.Left > Rule.Node_Count
-              or else N.Right < 1 or else N.Right > Rule.Node_Count
-            then
-               return (Matched => False, Error => Error_Invalid_Rule);
-            end if;
-            declare
-               L : constant Eval_Result :=
-                 Eval_Node (Rule, Event, N.Left, Fuel - 1);
-               R : constant Eval_Result :=
-                 Eval_Node (Rule, Event, N.Right, Fuel - 1);
-            begin
-               if L.Error /= Error_None then
-                  return L;
-               end if;
-               if R.Error /= Error_None then
-                  return R;
-               end if;
-               return (Matched => L.Matched or R.Matched,
-                       Error   => Error_None);
-            end;
-         when N_One_Of =>
-            declare
-               Any      : Boolean := False;
-               Any_Err  : Eval_Error := Error_None;
-               Any_Seen : Boolean := False;
-            begin
-               for I in 1 .. Rule.Sel_Count loop
-                  if Has_Prefix (Rule.Selections (I).Name, N.Prefix) then
-                     Any_Seen := True;
-                     declare
-                        R : constant Eval_Result :=
-                          Eval_Selection (Rule.Selections (I), Event);
-                     begin
-                        if R.Error /= Error_None then
-                           Any_Err := R.Error;
-                        elsif R.Matched then
-                           Any := True;
-                        end if;
-                     end;
-                  end if;
-               end loop;
-               if Any_Err /= Error_None then
-                  return (Matched => False, Error => Any_Err);
-               end if;
-               if not Any_Seen then
+      if Idx > Rule.Node_Count then
+         return (Matched => False, Error => Error_Invalid_Rule);
+      end if;
+      declare
+         N : constant Condition_Node := Rule.Nodes (Idx);
+      begin
+         case N.Kind is
+            when N_Ref =>
+               if N.Sel_Index > Rule.Sel_Count then
                   return (Matched => False, Error => Error_Invalid_Rule);
                end if;
-               return (Matched => Any, Error => Error_None);
-            end;
-         when N_All_Of =>
-            declare
-               All      : Boolean := True;
-               Any_Err  : Eval_Error := Error_None;
-               Any_Seen : Boolean := False;
-            begin
-               for I in 1 .. Rule.Sel_Count loop
-                  if Has_Prefix (Rule.Selections (I).Name, N.Prefix) then
-                     Any_Seen := True;
-                     declare
-                        R : constant Eval_Result :=
-                          Eval_Selection (Rule.Selections (I), Event);
-                     begin
-                        if R.Error /= Error_None then
-                           Any_Err := R.Error;
-                        elsif not R.Matched then
-                           All := False;
-                        end if;
-                     end;
+               return Match_Selection (Rule.Selections (N.Sel_Index), Event);
+            when N_Not =>
+               declare
+                  C : constant Eval_Result := Eval_Node (Rule, Event, N.Child, Fuel - 1);
+               begin
+                  if C.Error /= Error_None then
+                     return C;
                   end if;
-               end loop;
-               if Any_Err /= Error_None then
-                  return (Matched => False, Error => Any_Err);
-               end if;
-               if not Any_Seen then
-                  return (Matched => False, Error => Error_Invalid_Rule);
-               end if;
-               return (Matched => All, Error => Error_None);
-            end;
-         when N_Near | N_Count =>
-            return (Matched => False,
-                    Error   => Error_Unsupported_Condition);
-      end case;
+                  return (Matched => not C.Matched, Error => Error_None);
+               end;
+            when N_And =>
+               declare
+                  L : constant Eval_Result := Eval_Node (Rule, Event, N.Left, Fuel - 1);
+                  R : constant Eval_Result := Eval_Node (Rule, Event, N.Right, Fuel - 1);
+               begin
+                  if L.Error /= Error_None then
+                     return L;
+                  end if;
+                  if R.Error /= Error_None then
+                     return R;
+                  end if;
+                  return (Matched => L.Matched and R.Matched,
+                          Error   => Error_None);
+               end;
+            when N_Or =>
+               declare
+                  L : constant Eval_Result := Eval_Node (Rule, Event, N.Left, Fuel - 1);
+                  R : constant Eval_Result := Eval_Node (Rule, Event, N.Right, Fuel - 1);
+               begin
+                  if L.Error /= Error_None then
+                     return L;
+                  end if;
+                  if R.Error /= Error_None then
+                     return R;
+                  end if;
+                  return (Matched => L.Matched or R.Matched,
+                          Error   => Error_None);
+               end;
+            when N_One_Of =>
+               declare
+                  First_Error : Eval_Error := Error_None;
+                  Saw_Error   : Boolean := False;
+               begin
+                  for I in 1 .. Rule.Sel_Count loop
+                     pragma Loop_Invariant (Rule.Sel_Count <= Max_Selections);
+                     if Has_Prefix (Rule.Selections (I).Name, N.Prefix) then
+                        declare
+                           R : constant Eval_Result :=
+                             Match_Selection (Rule.Selections (I), Event);
+                        begin
+                           if R.Error /= Error_None and then not Saw_Error then
+                              First_Error := R.Error;
+                              Saw_Error := True;
+                           end if;
+                           if R.Error = Error_None and then R.Matched then
+                              return (Matched => True, Error => Error_None);
+                           end if;
+                        end;
+                     end if;
+                  end loop;
+                  if Saw_Error then
+                     --  Fail-closed: a matching-shaped branch errored and
+                     --  nothing cleanly matched.
+                     return (Matched => False, Error => First_Error);
+                  end if;
+                  return (Matched => False, Error => Error_None);
+               end;
+            when N_All_Of =>
+               declare
+                  First_Error : Eval_Error := Error_None;
+                  Saw_Error   : Boolean := False;
+               begin
+                  for I in 1 .. Rule.Sel_Count loop
+                     pragma Loop_Invariant (Rule.Sel_Count <= Max_Selections);
+                     if Has_Prefix (Rule.Selections (I).Name, N.Prefix) then
+                        declare
+                           R : constant Eval_Result :=
+                             Match_Selection (Rule.Selections (I), Event);
+                        begin
+                           if R.Error /= Error_None then
+                              if not Saw_Error then
+                                 First_Error := R.Error;
+                                 Saw_Error := True;
+                              end if;
+                           elsif not R.Matched then
+                              return (Matched => False, Error => Error_None);
+                           end if;
+                        end;
+                     end if;
+                  end loop;
+                  if Saw_Error then
+                     return (Matched => False, Error => First_Error);
+                  end if;
+                  --  Vacuous truth over an empty prefix set, per Sigma.
+                  return (Matched => True, Error => Error_None);
+               end;
+            when N_Near | N_Count =>
+               return (Matched => False,
+                       Error   => Error_Unsupported_Condition);
+         end case;
+      end;
    end Eval_Node;
 
    function Empty_Rule return Compiled_Rule is
-     ((Selections => [others =>
-        (Name        => <>, Fields => [others => <>], Field_Count => 0)],
-       Sel_Count  => 0,
-       Nodes      => [others => <>],
-       Node_Count => 0,
-       Root       => 0));
+      R : Compiled_Rule;
+   begin
+      R.Sel_Count := 0;
+      R.Node_Count := 0;
+      R.Root := 0;
+      return R;
+   end Empty_Rule;
 
    function Evaluate
      (Rule : Compiled_Rule; Event : Event_Record) return Eval_Result
    is
    begin
-      if Rule.Root < 1 or else Rule.Root > Rule.Node_Count then
+      if Rule.Root = 0 or else Rule.Root > Rule.Node_Count then
          return (Matched => False, Error => Error_Invalid_Rule);
       end if;
       return Eval_Node (Rule, Event, Rule.Root, Max_Condition_Nodes);
