@@ -242,6 +242,7 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
       begin
          for K in 0 .. Needle'Length - 1 loop
             pragma Loop_Invariant (Offset = Haystack'Length - Needle'Length);
+            pragma Loop_Invariant (Offset + K <= Haystack'Length);
             if Fold (Haystack (Haystack'First + Offset + K)) /=
               Fold (Needle (Needle'First + K))
             then
