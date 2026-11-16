@@ -1,12 +1,15 @@
 --  Copyright 2026 Ryan
 --  SPDX-License-Identifier: Apache-2.0
 --
---  Boundary loader: YAML text in, Compiled_Rule out.
+--  Boundary: loads a Sigma YAML rule into an Engine.Compiled_Rule.
 --
---  Deliberately outside SPARK (adayıml's API is not provable).
---  Contract: every lossy situation — truncation, unknown shape,
---  unsupported modifier, oversized table — is a Load_Error, never
---  silent data loss.
+--  The YAML parse itself (adayıml, SPARK off) is outside the proof;
+--  this package's job is to translate the parsed event stream into
+--  core AST values WITHOUT silent loss: over-long strings, unknown
+--  modifiers, unknown condition keywords and empty rules all become
+--  explicit Load_Error values, never truncated or defaulted data.
+--  Integer fields use Integer; magnitudes outside Integer'Range are
+--  rejected here, never wrapped in the core.
 
 with Sigma_Verdict.Defaults;
 
@@ -16,20 +19,28 @@ package Sigma_Verdict.Boundary with SPARK_Mode => Off is
 
    type Load_Error is
      (Load_Ok,
-      Load_Empty_Input,
-      Load_Overflow,          --  input or table bigger than capacity
-      Load_Syntax,            --  adayaml lexer/parser error
-      Load_Unknown_Shape,     --  detection/selection/condition missing
-      Load_Unknown_Condition, --  condition references nothing known
-      Load_Unsupported,       --  modifier or construct for Phase 2
-      Load_Too_Complex);      --  rule shape exceeds engine capacities
+      Load_YAML_Error,
+      Load_Too_Long,
+      Load_Too_Many_Selections,
+      Load_Too_Many_Fields,
+      Load_Too_Many_Values,
+      Load_Too_Many_Nodes,
+      Load_Too_Many_Modifiers,
+      Load_Unknown_Modifier,
+      Load_Unknown_Condition,
+      Load_Bad_Integer,
+      Load_Empty_Rule,
+      Load_Internal);
 
+   --  Parse one Sigma rule document (UTF-8 YAML text) into Compiled_Rule.
+   --  Only the detection/logsource subset of SPECIFICATION.md is read;
+   --  title/id/logsource metadata are accepted and ignored.
    procedure Load_Detection
      (YAML_Text : String;
       Rule      : out E.Compiled_Rule;
       Error     : out Load_Error;
       Detail    : out Natural);
-   --  Parse one Sigma detection block. Detail carries the adayaml
-   --  event index where loading stopped (0 when not applicable).
+   --  Detail carries the 1-based byte offset of the failure when known,
+   --  else 0. Rule is Empty_Rule unless Error = Load_Ok.
 
 end Sigma_Verdict.Boundary;
