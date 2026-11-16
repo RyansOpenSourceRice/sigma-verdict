@@ -1,155 +1,780 @@
 --  Copyright 2026 Ryan
 --  SPDX-License-Identifier: Apache-2.0
---
---  Event-driven YAML loader on top of adayaml ~0.2.0.
---
---  Accepts the Phase-1 rule shape:
---    detection:
---      <selection-name>:
---        EventID: 4728
---        CommandLine|contains: 'whoami'
---      condition: <selection-name>
---  Metadata keys (title/id/logsource/...) are accepted and ignored.
---  Anything else is an explicit Load_Error.
 
-with Ada.Strings.Fixed;
+with Sigma_Verdict.Limits;
+with Yaml;
 with Yaml.Parser;
-with Yaml.Events;
-with Sigma_Verdict.Defaults;
+
+use Yaml;
+use Yaml.Parser;
 
 package body Sigma_Verdict.Boundary with SPARK_Mode => Off is
 
-   package EV renames Yaml.Events;
+   use E;
 
-   function Strip_Quotes (S : String) return String is
-     (if S'Length >= 2
-        and then ((S (S'First) = ''' and then S (S'Last) = ''')
-                  or else (S (S'First) = '"' and then S (S'Last) = '"'))
-      then S (S'First + 1 .. S'Last - 1)
-      else S);
+   Max_Key_Length   : constant := 256;
+   Max_Stack_Depth  : constant := 16;
+   Max_Cond_Length  : constant := 1024;
+   Max_Cond_Tokens  : constant := 64;
+   Max_Token_Length : constant := 128;
 
-   function To_Lower_Str (S : String) return String is
-      R : String (S'Range) := S;
+   subtype Key_Buffer is String (1 .. Max_Key_Length);
+   subtype Cond_Buffer is String (1 .. Max_Cond_Length);
+   subtype Token_Buffer is String (1 .. Max_Token_Length);
+
+   type Frame_Kind is (F_Root, F_Skip, F_Detection, F_Selection);
+
+   type Frame is record
+      Kind         : Frame_Kind := F_Root;
+      Expects_Key  : Boolean := True;
+      Ignored      : Boolean := False;
+      Key_Len      : Natural := 0;
+      Key          : Key_Buffer := [others => ' '];
+      Sel_Index    : Natural := 0;
+      --  List accumulation for `Field: [a, b]` values.
+      In_List      : Boolean := False;
+      List_Is_Int  : Boolean := True;
+      List_Has_Int : Boolean := False;
+      List_Has_Txt : Boolean := False;
+      List_Count   : Natural := 0;
+      List_Ints    : E.Int_Array := [others => 0];
+      List_Items   : E.Value_Text_Array :=
+        [others => (Length => 0,
+                    Data   => [others => ' '])];
+   end record;
+
+   type Frame_Stack is array (1 .. Max_Stack_Depth) of Frame;
+
+   type Loader is record
+      Rule       : E.Compiled_Rule := E.Empty_Rule;
+      Frames     : Frame_Stack;
+      Depth      : Natural := 0;
+      In_Detect  : Boolean := False;
+      Error      : Load_Error := Load_Ok;
+      Detail     : Natural := 0;
+      Cond_Len   : Natural := 0;
+      Cond       : Cond_Buffer := [others => ' '];
+      Have_Cond  : Boolean := False;
+   end record;
+
+   procedure Fail (L : in out Loader; E : Load_Error; Loc : Natural := 0) is
    begin
-      for I in R'Range loop
-         if R (I) in 'A' .. 'Z' then
-            R (I) := Character'Val (Character'Pos (R (I)) + 32);
+      if L.Error = Load_Ok then
+         L.Error := E;
+         L.Detail := Loc;
+      end if;
+   end Fail;
+
+   procedure Copy_Key
+     (L : in out Loader; Text : String; Loc : Natural)
+   is
+      F : Frame renames L.Frames (L.Depth);
+   begin
+      if Text'Length > Max_Key_Length then
+         Fail (L, Load_Too_Long, Loc);
+         return;
+      end if;
+      F.Key_Len := Text'Length;
+      F.Key (1 .. Text'Length) := Text;
+      F.Expects_Key := False;
+   end Copy_Key;
+
+   function Pending_Key (L : Loader) return String is
+      F : Frame renames L.Frames (L.Depth);
+   begin
+      return F.Key (1 .. F.Key_Len);
+   end Pending_Key;
+
+   procedure Push (L : in out Loader; Kind : Frame_Kind; Loc : Natural) is
+   begin
+      if L.Depth >= Max_Stack_Depth then
+         Fail (L, Load_Internal, Loc);
+         return;
+      end if;
+      L.Depth := L.Depth + 1;
+      L.Frames (L.Depth) :=
+        (Kind => Kind, Expects_Key => True, Ignored => False,
+         Key_Len => 0, Key => [others => ' '], Sel_Index => 0,
+         In_List => False, List_Is_Int => True,
+         List_Has_Int => False, List_Has_Txt => False,
+         List_Count => 0, List_Ints => [others => 0],
+         List_Items =>
+           [others => (Length => 0, Data => [others => ' '])]);
+   end Push;
+
+   procedure Pop (L : in out Loader) is
+   begin
+      if L.Depth >= 1 then
+         if L.Frames (L.Depth).Kind = F_Detection then
+            L.In_Detect := False;
+         end if;
+         L.Depth := L.Depth - 1;
+      end if;
+   end Pop;
+
+   --  Split "CommandLine|windash|contains" into field name + modifiers.
+   procedure Parse_Field_Key
+     (L         : in out Loader;
+      Key       : String;
+      Loc       : Natural;
+      Field     : out E.Field_Name;
+      Mods      : out E.Modifier_Set;
+      Supported : out Boolean)
+   is
+      Start : Positive := Key'First;
+      Piece : Natural;
+      M     : E.Modifier_Kind;
+      Ok    : Boolean;
+      First : Boolean := True;
+   begin
+      Field := (Length => 0, Data => [others => ' ']);
+      Mods := E.Empty_Modifiers;
+      Supported := True;
+      for I in Key'Range loop
+         if Key (I) = '|' then
+            Piece := I - Start;
+            if First then
+               if Piece = 0
+                 or else Start + Piece - 1 > Key'Last
+                 or else Piece >
+                   Limits.Default_Field_Length
+               then
+                  Fail (L, Load_Too_Long, Loc);
+                  Supported := False;
+                  return;
+               end if;
+               declare
+                  R : constant E.Field_Result :=
+                    E.To_Field_Name (Key (Start .. Start + Piece - 1));
+               begin
+                  if not R.Ok then
+                     Fail (L, Load_Too_Long, Loc);
+                     Supported := False;
+                     return;
+                  end if;
+                  Field := R.Value;
+               end;
+               First := False;
+            else
+               M := E.Parse_Modifier (Key (Start .. I - 1));
+               if M = E.Mod_Unknown then
+                  Fail (L, Load_Unknown_Modifier, Loc);
+                  Supported := False;
+                  return;
+               end if;
+               E.Add_Modifier (Mods, M, Ok);
+               if not Ok then
+                  Fail (L, Load_Too_Many_Modifiers, Loc);
+                  Supported := False;
+                  return;
+               end if;
+            end if;
+            Start := I + 1;
          end if;
       end loop;
-      return R;
-   end To_Lower_Str;
-
-   function Split_Modifier (Name : String; Base : out Natural; Has_Mod : out Boolean) return E.Modifier_Kind is
-      Bar : constant Natural := Ada.Strings.Fixed.Index (Name, "|");
-   begin
-      Has_Mod := Bar > 0;
-      if Bar = 0 then
-         Base := Name'Length;
-         return E.Mod_None;
-      end if;
-      Base := Bar - Name'First;
-      declare
-         M : constant String := To_Lower_Str (Name (Bar + 1 .. Name'Last));
-      begin
-         if M = "contains" then
-            return E.Mod_Contains;
-         elsif M = "startswith" then
-            return E.Mod_Startswith;
-         elsif M = "endswith" then
-            return E.Mod_Endswith;
-         else
-            return E.Mod_Re;  --  any other modifier: Phase 2 bucket
-         end if;
-      end;
-   end Split_Modifier;
-
-   procedure Set_Field_Name
-     (Rule : in out E.Compiled_Rule; Sel : Positive;
-      Name : String; Ok : out Boolean)
-   is
-   begin
-      Ok := Name'Length <= Rule.Selections (Sel).Name'Length;
-      if Ok then
-         Rule.Selections (Sel).Name (1 .. Name'Length) := Name;
-         Rule.Selections (Sel).Name_Len := Name'Length;
-      end if;
-   end Set_Field_Name;
-
-   procedure Add_Field
-     (Rule     : in out E.Compiled_Rule;
-      Sel      : Positive;
-      Name     : String;
-      Modifier : E.Modifier_Kind;
-      Value    : String;
-      Is_Int   : Boolean;
-      Int_Val  : Integer;
-      Error    : out Load_Error)
-   is
-      F : E.Field_Constraint renames Rule.Selections (Sel).Fields
-        (Rule.Selections (Sel).Field_Count + 1);
-   begin
-      Error := Load_Ok;
-      if Rule.Selections (Sel).Field_Count >= E.Max_Fields_Per_Sel then
-         Error := Load_Too_Complex;
-         return;
-      end if;
-      if Name'Length > F.Field'Length then
-         Error := Load_Overflow;
-         return;
-      end if;
-      case Modifier is
-         when E.Mod_None | E.Mod_Contains | E.Mod_Startswith | E.Mod_Endswith =>
-            null;
-         when others =>
-            Error := Load_Unsupported;
-            return;
-      end case;
-      if Is_Int then
-         if Modifier /= E.Mod_None then
-            Error := Load_Unsupported;
-            return;
-         end if;
-         if Value'Length > 0 then
-            Error := Load_Syntax;
-            return;
-         end if;
-      else
-         if Strip_Quotes (Value)'Length > F.Expected.Single.Data'Length then
-            Error := Load_Overflow;
-            return;
-         end if;
-      end if;
-      Rule.Selections (Sel).Field_Count :=
-        Rule.Selections (Sel).Field_Count + 1;
-      F.Field (1 .. Name'Length) := Name;
-      F.Field_Len := Name'Length;
-      F.Modifiers :=
-        (Count => (if Modifier = E.Mod_None then 0 else 1),
-         Items => [1 => Modifier, others => E.Mod_None]);
-      if Is_Int then
-         F.Expected :=
-           (Max_Len   => F.Expected.Single.Max_Len,
-            Max_Items => F.Expected.List.Max_Items,
-            Kind      => E.E_Int,
-            Int_Value => Int_Val);
-      else
+      if First then
          declare
-            V : constant String := Strip_Quotes (Value);
+            R : constant E.Field_Result := E.To_Field_Name (Key);
+         begin
+            if not R.Ok then
+               Fail (L, Load_Too_Long, Loc);
+               Supported := False;
+               return;
+            end if;
+            Field := R.Value;
+         end;
+      else
+         if Start > Key'Last then
+            Fail (L, Load_Unknown_Modifier, Loc);
+            Supported := False;
+            return;
+         end if;
+         M := E.Parse_Modifier (Key (Start .. Key'Last));
+         if M = E.Mod_Unknown then
+            Fail (L, Load_Unknown_Modifier, Loc);
+            Supported := False;
+            return;
+         end if;
+         E.Add_Modifier (Mods, M, Ok);
+         if not Ok then
+            Fail (L, Load_Too_Many_Modifiers, Loc);
+            Supported := False;
+            return;
+         end if;
+      end if;
+   end Parse_Field_Key;
+
+   procedure Append_Field
+     (L : in out Loader; Sel : Natural; F : E.Field_Constraint; Loc : Natural)
+   is
+      S : E.Selection renames L.Rule.Selections (Sel);
+   begin
+      if not E.Can_Add_Field (S) then
+         Fail (L, Load_Too_Many_Fields, Loc);
+         return;
+      end if;
+      S.Field_Count := S.Field_Count + 1;
+      S.Fields (S.Field_Count) := F;
+   end Append_Field;
+
+   --  Build one field constraint from a scalar YAML value. Plain-style
+   --  integers (EventID: 4728) become E_Int; quoted or non-numeric
+   --  scalars become E_Text. Chains holding re/wildcard become
+   --  E_Pattern so the core fails closed with Unsupported.
+   procedure Add_Scalar_Field
+     (L       : in out Loader;
+      Sel     : Natural;
+      Key     : String;
+      Text    : String;
+      Is_Plain : Boolean;
+      Loc     : Natural)
+   is
+      Field : E.Field_Name;
+      Mods  : E.Modifier_Set;
+      OK    : Boolean;
+      F     : E.Field_Constraint;
+      Wants_Pattern : Boolean;
+   begin
+      Parse_Field_Key (L, Key, Loc, Field, Mods, OK);
+      if not OK then
+         return;
+      end if;
+      Wants_Pattern := False;
+      for I in 1 .. Mods.Count loop
+         if Mods.Items (I) in E.Mod_Re | E.Mod_Re_I | E.Mod_Re_M
+           | E.Mod_Re_S | E.Mod_Wildcard
+         then
+            Wants_Pattern := True;
+         end if;
+      end loop;
+      F := (Field => Field, Modifiers => Mods,
+            Expected => (Kind => E.E_Text,
+                         Single => (Length => 0, Data => [others => ' '])));
+      if Wants_Pattern then
+         declare
+            P : constant E.Pattern_Result := E.To_Pattern (Text);
+         begin
+            if not P.Ok then
+               Fail (L, Load_Too_Long, Loc);
+               return;
+            end if;
+            F.Expected := (Kind => E.E_Pattern, Pattern => P.Value);
+         end;
+      elsif Is_Plain then
          begin
             F.Expected :=
-              (Max_Len   => F.Expected.Single.Max_Len,
-               Max_Items => F.Expected.List.Max_Items,
-               Kind      => E.E_Text,
-               Single    =>
-                 (Max_Len => F.Expected.Single.Max_Len,
-                  Data    => [others => ' '],
-                  Length  => V'Length));
-            F.Expected.Single.Data (1 .. V'Length) := V;
+              (Kind => E.E_Int,
+               Int_Value => Integer'Value (Text));
+         exception
+            when Constraint_Error =>
+               declare
+                  V : constant E.Value_Result := E.To_Value_Text (Text);
+               begin
+                  if not V.Ok then
+                     Fail (L, Load_Too_Long, Loc);
+                     return;
+                  end if;
+                  F.Expected := (Kind => E.E_Text, Single => V.Value);
+               end;
+         end;
+      else
+         declare
+            V : constant E.Value_Result := E.To_Value_Text (Text);
+         begin
+            if not V.Ok then
+               Fail (L, Load_Too_Long, Loc);
+               return;
+            end if;
+            F.Expected := (Kind => E.E_Text, Single => V.Value);
          end;
       end if;
-   end Add_Field;
+      Append_Field (L, Sel, F, Loc);
+   end Add_Scalar_Field;
 
-   type Ctx_State is (C_Root, C_Detection, C_Selection, C_Condition, C_Skip);
+   procedure Add_List_Item
+     (L : in out Loader; Text : String; Is_Plain : Boolean; Loc : Natural)
+   is
+      F : Frame renames L.Frames (L.Depth);
+   begin
+      if F.List_Count >= Limits.Default_Values_Per_Sel then
+         Fail (L, Load_Too_Many_Values, Loc);
+         return;
+      end if;
+      if Is_Plain then
+         begin
+            F.List_Count := F.List_Count + 1;
+            F.List_Ints (F.List_Count) := Integer'Value (Text);
+            F.List_Has_Int := True;
+            return;
+         exception
+            when Constraint_Error =>
+               null;
+         end;
+      end if;
+      declare
+         V : constant E.Value_Result := E.To_Value_Text (Text);
+      begin
+         if not V.Ok then
+            Fail (L, Load_Too_Long, Loc);
+            return;
+         end if;
+         F.List_Count := F.List_Count + 1;
+         F.List_Items (F.List_Count) := V.Value;
+         F.List_Has_Txt := True;
+      end;
+   end Add_List_Item;
+
+   procedure Close_List
+     (L : in out Loader; Idx : Natural; Loc : Natural) is
+      F     : Frame renames L.Frames (Idx);
+      Field : E.Field_Name;
+      Mods  : E.Modifier_Set;
+      OK    : Boolean;
+      FC    : E.Field_Constraint;
+   begin
+      F.In_List := False;
+      if F.List_Has_Int and then F.List_Has_Txt then
+         Fail (L, Load_Bad_Integer, Loc);
+         return;
+      end if;
+      Parse_Field_Key
+        (L, F.Key (1 .. F.Key_Len), Loc, Field, Mods, OK);
+      if not OK then
+         return;
+      end if;
+      if F.List_Has_Int then
+         FC := (Field => Field, Modifiers => Mods,
+                Expected => (Kind => E.E_Int_List,
+                             Ints => [others => 0],
+                             Int_Count => 0));
+         FC.Expected.Int_Count := F.List_Count;
+         for I in 1 .. F.List_Count loop
+            FC.Expected.Ints (I) := F.List_Ints (I);
+         end loop;
+      else
+         FC := (Field => Field, Modifiers => Mods,
+                Expected => (Kind => E.E_Text_List,
+                             Items => [others =>
+                               (Length => 0, Data => [others => ' '])],                             Count => 0));
+         FC.Expected.Count := F.List_Count;
+         for I in 1 .. F.List_Count loop
+            FC.Expected.Items (I) := F.List_Items (I);
+         end loop;
+      end if;
+      Append_Field (L, F.Sel_Index, FC, Loc);
+      F.List_Count := 0;
+      F.List_Has_Int := False;
+      F.List_Has_Txt := False;
+   end Close_List;
+
+   procedure Open_Selection (L : in out Loader; Name : String; Loc : Natural) is
+   begin
+      if not E.Can_Add_Selection (L.Rule.Sel_Count) then
+         Fail (L, Load_Too_Many_Selections, Loc);
+         Push (L, F_Skip, Loc);
+         return;
+      end if;
+      declare
+         R : constant E.Field_Result := E.To_Field_Name (Name);
+      begin
+         if not R.Ok then
+            Fail (L, Load_Too_Long, Loc);
+            Push (L, F_Skip, Loc);
+            return;
+         end if;
+         L.Rule.Sel_Count := L.Rule.Sel_Count + 1;
+         L.Rule.Selections (L.Rule.Sel_Count).Name := R.Value;
+         L.Rule.Selections (L.Rule.Sel_Count).Field_Count := 0;
+         for J in L.Rule.Selections (L.Rule.Sel_Count).Fields'Range loop
+            L.Rule.Selections (L.Rule.Sel_Count).Fields (J) :=
+              (Field     => (Length => 0, Data => [others => ' ']),
+               Modifiers => E.Empty_Modifiers,
+               Expected  => (Kind   => E.E_Text,
+                             Single => (Length => 0,
+                                        Data => [others => ' '])));
+         end loop;
+         Push (L, F_Selection, Loc);
+         L.Frames (L.Depth).Sel_Index := L.Rule.Sel_Count;
+      end;
+   end Open_Selection;
+
+   ------------------------
+   --  Condition parsing --
+   ------------------------
+
+   type Token_Array is array (1 .. Max_Cond_Tokens) of Token_Buffer;
+   type Token_Lens is array (1 .. Max_Cond_Tokens) of Natural;
+
+   function Resolve_Ref
+     (L : in out Loader; Name : String; Loc : Natural) return Natural
+   is
+   begin
+      for I in 1 .. L.Rule.Sel_Count loop
+         if E.Image_Of (L.Rule.Selections (I).Name) = Name then
+            return I;
+         end if;
+      end loop;
+      Fail (L, Load_Unknown_Condition, Loc);
+      return 0;
+   end Resolve_Ref;
+
+   function New_Node (L : in out Loader; N : E.Condition_Node) return Natural is
+   begin
+      if not E.Can_Add_Node (L.Rule.Node_Count) then
+         Fail (L, Load_Too_Many_Nodes, 0);
+         return 0;
+      end if;
+      L.Rule.Node_Count := L.Rule.Node_Count + 1;
+      L.Rule.Nodes (L.Rule.Node_Count) := N;
+      return L.Rule.Node_Count;
+   end New_Node;
+
+   --  Minimal condition grammar (see SPECIFICATION.md):
+   --    or  := and {"or" and}
+   --    and := unary {"and" unary}
+   --    unary := ["not"] primary
+   --    primary := IDENT | "1" "of" PREFIX* | "all" "of" PREFIX*
+   --  Parentheses and aggregation pipes are rejected explicitly.
+   procedure Parse_Condition (L : in out Loader) is
+      Tokens : Token_Array := [others => [others => ' ']];
+      Lens   : Token_Lens := [others => 0];
+      Count  : Natural := 0;
+      Pos    : Natural := 1;
+      Start  : Natural;
+
+      function Tok (I : Natural) return String is
+        (Tokens (I) (1 .. Lens (I)));
+
+      procedure Parse_Or (R : out Natural; Ok : out Boolean);
+      procedure Parse_And (R : out Natural; Ok : out Boolean);
+      procedure Parse_Unary (R : out Natural; Ok : out Boolean);
+      procedure Parse_Primary (R : out Natural; Ok : out Boolean);
+
+      procedure Parse_Primary (R : out Natural; Ok : out Boolean) is
+         Idx : Natural;
+      begin
+         R := 0;
+         Ok := False;
+         if Pos > Count then
+            Fail (L, Load_Unknown_Condition, 0);
+            return;
+         end if;
+         if Tok (Pos) = "1" or else Tok (Pos) = "all" then
+            declare
+               Is_One : constant Boolean := Tok (Pos) = "1";
+            begin
+               Pos := Pos + 1;
+               if Pos + 1 > Count + 1
+                 or else Tok (Pos) /= "of"
+               then
+                  Fail (L, Load_Unknown_Condition, 0);
+                  return;
+               end if;
+               Pos := Pos + 1;
+               if Pos > Count then
+                  Fail (L, Load_Unknown_Condition, 0);
+                  return;
+               end if;
+               declare
+                  P : constant String := Tok (Pos);
+               begin
+                  if P'Length < 2 or else P (P'Last) /= '*' then
+                     Fail (L, Load_Unknown_Condition, 0);
+                     return;
+                  end if;
+                  declare
+                     FR : constant E.Field_Result :=
+                       E.To_Field_Name (P (P'First .. P'Last - 1));
+                  begin
+                     if not FR.Ok then
+                        Fail (L, Load_Too_Long, 0);
+                        return;
+                     end if;
+                     Pos := Pos + 1;
+                     if Is_One then
+                        Idx := New_Node
+                          (L, (Kind => E.N_One_Of, Prefix => FR.Value));
+                     else
+                        Idx := New_Node
+                          (L, (Kind => E.N_All_Of, Prefix => FR.Value));
+                     end if;
+                     if L.Error /= Load_Ok then
+                        return;
+                     end if;
+                     R := Idx;
+                     Ok := True;
+                  end;
+               end;
+            end;
+         elsif Tok (Pos) = "near" or else Tok (Pos) = "count" then
+            --  Reserved Phase 2 surface; rejected explicitly.
+            Fail (L, Load_Unknown_Condition, 0);
+            return;
+         else
+            declare
+               S : constant Natural := Resolve_Ref (L, Tok (Pos), 0);
+            begin
+               if L.Error /= Load_Ok then
+                  return;
+               end if;
+               Pos := Pos + 1;
+               Idx := New_Node (L, (Kind => E.N_Ref, Sel_Index => S));
+               if L.Error /= Load_Ok then
+                  return;
+               end if;
+               R := Idx;
+               Ok := True;
+            end;
+         end if;
+      end Parse_Primary;
+
+      procedure Parse_Unary (R : out Natural; Ok : out Boolean) is
+         Inner : Natural;
+         Idx   : Natural;
+      begin
+         if Pos <= Count and then Tok (Pos) = "not" then
+            Pos := Pos + 1;
+            Parse_Primary (Inner, Ok);
+            if not Ok then
+               R := 0;
+               return;
+            end if;
+            Idx := New_Node (L, (Kind => E.N_Not, Child => Inner));
+            if L.Error /= Load_Ok then
+               Ok := False;
+               R := 0;
+               return;
+            end if;
+            R := Idx;
+            Ok := True;
+         else
+            Parse_Primary (R, Ok);
+         end if;
+      end Parse_Unary;
+
+      procedure Parse_And (R : out Natural; Ok : out Boolean) is
+         Left, Right : Natural;
+         Idx         : Natural;
+      begin
+         Parse_Unary (Left, Ok);
+         if not Ok then
+            R := 0;
+            return;
+         end if;
+         while Pos <= Count and then Tok (Pos) = "and" loop
+            Pos := Pos + 1;
+            Parse_Unary (Right, Ok);
+            if not Ok then
+               R := 0;
+               return;
+            end if;
+            Idx := New_Node
+              (L, (Kind => E.N_And, Left => Left, Right => Right));
+            if L.Error /= Load_Ok then
+               Ok := False;
+               R := 0;
+               return;
+            end if;
+            Left := Idx;
+         end loop;
+         R := Left;
+         Ok := True;
+      end Parse_And;
+
+      procedure Parse_Or (R : out Natural; Ok : out Boolean) is
+         Left, Right : Natural;
+         Idx         : Natural;
+      begin
+         Parse_And (Left, Ok);
+         if not Ok then
+            R := 0;
+            return;
+         end if;
+         while Pos <= Count and then Tok (Pos) = "or" loop
+            Pos := Pos + 1;
+            Parse_And (Right, Ok);
+            if not Ok then
+               R := 0;
+               return;
+            end if;
+            Idx := New_Node
+              (L, (Kind => E.N_Or, Left => Left, Right => Right));
+            if L.Error /= Load_Ok then
+               Ok := False;
+               R := 0;
+               return;
+            end if;
+            Left := Idx;
+         end loop;
+         R := Left;
+         Ok := True;
+      end Parse_Or;
+
+      Root : Natural;
+      Ok   : Boolean;
+   begin
+      --  Tokenize on spaces.
+      while Pos <= L.Cond_Len loop
+         while Pos <= L.Cond_Len and then L.Cond (Pos) = ' ' loop
+            Pos := Pos + 1;
+         end loop;
+         exit when Pos > L.Cond_Len;
+         Start := Pos;
+         while Pos <= L.Cond_Len and then L.Cond (Pos) /= ' ' loop
+            Pos := Pos + 1;
+         end loop;
+         if Count >= Max_Cond_Tokens then
+            Fail (L, Load_Too_Many_Nodes, 0);
+            return;
+         end if;
+         if Pos - Start > Max_Token_Length then
+            Fail (L, Load_Too_Long, 0);
+            return;
+         end if;
+         Count := Count + 1;
+         Lens (Count) := Pos - Start;
+         Tokens (Count) (1 .. Pos - Start) := L.Cond (Start .. Pos - 1);
+      end loop;
+      if Count = 0 then
+         Fail (L, Load_Empty_Rule, 0);
+         return;
+      end if;
+      Pos := 1;
+      Parse_Or (Root, Ok);
+      if not Ok then
+         return;
+      end if;
+      if Pos <= Count then
+         Fail (L, Load_Unknown_Condition, 0);
+         return;
+      end if;
+      L.Rule.Root := Root;
+   end Parse_Condition;
+
+   --------------------
+   --  Event driver --
+   --------------------
+
+   procedure Handle_Scalar
+     (L : in out Loader; Text : String; Is_Plain : Boolean; Loc : Natural)
+   is
+      F : Frame renames L.Frames (L.Depth);
+   begin
+      if F.Ignored then
+         return;
+      end if;
+      if F.In_List then
+         Add_List_Item (L, Text, Is_Plain, Loc);
+         return;
+      end if;
+      if F.Expects_Key then
+         Copy_Key (L, Text, Loc);
+         return;
+      end if;
+      F.Expects_Key := True;
+      case F.Kind is
+         when F_Root =>
+            if Pending_Key (L) = "condition" then
+               if Text'Length > Max_Cond_Length then
+                  Fail (L, Load_Too_Long, Loc);
+                  return;
+               end if;
+               L.Cond_Len := Text'Length;
+               L.Cond (1 .. Text'Length) := Text;
+               L.Have_Cond := True;
+            end if;
+            --  All other root scalars (title, id, status, ...) are
+            --  metadata and intentionally ignored.
+         when F_Detection =>
+            --  `condition` lives under `detection` in real Sigma rules.
+            if Pending_Key (L) = "condition" then
+               if Text'Length > Max_Cond_Length then
+                  Fail (L, Load_Too_Long, Loc);
+                  return;
+               end if;
+               L.Cond_Len := Text'Length;
+               L.Cond (1 .. Text'Length) := Text;
+               L.Have_Cond := True;
+            end if;
+         when F_Selection =>
+            Add_Scalar_Field
+              (L, F.Sel_Index, Pending_Key (L), Text, Is_Plain, Loc);
+         when F_Skip =>
+            null;
+      end case;
+   end Handle_Scalar;
+
+   procedure Handle_Map_Value (L : in out Loader; Loc : Natural) is
+      F   : Frame renames L.Frames (L.Depth);
+      Key : constant String := Pending_Key (L);
+   begin
+      if F.Ignored then
+         Push (L, F_Skip, Loc);
+         return;
+      end if;
+      if F.Expects_Key then
+         --  No pending key: this mapping is the frame's own content
+         --  (document root, or the body of detection/selection).
+         return;
+      end if;
+      F.Expects_Key := True;
+      case F.Kind is
+         when F_Root =>
+            if Key = "detection" then
+               Push (L, F_Detection, Loc);
+               L.In_Detect := True;
+            else
+               --  logsource and other metadata subtrees are skipped.
+               Push (L, F_Skip, Loc);
+            end if;
+         when F_Detection =>
+            Open_Selection (L, Key, Loc);
+         when F_Selection =>
+            --  A mapping as a field value is outside Phase 1.
+            Fail (L, Load_Unknown_Condition, Loc);
+            Push (L, F_Skip, Loc);
+         when F_Skip =>
+            Push (L, F_Skip, Loc);
+      end case;
+   end Handle_Map_Value;
+
+   procedure Handle_Seq_Value (L : in out Loader; Loc : Natural) is
+      F : Frame renames L.Frames (L.Depth);
+   begin
+      if F.Ignored then
+         Push (L, F_Skip, Loc);
+         return;
+      end if;
+      if F.Kind = F_Skip then
+         --  A sequence nested inside a list value is outside Phase 1.
+         Fail (L, Load_Unknown_Condition, Loc);
+         Push (L, F_Skip, Loc);
+         return;
+      end if;
+      if F.Expects_Key then
+         --  No pending key: a bare sequence where a mapping belongs.
+         Fail (L, Load_Unknown_Condition, Loc);
+         Push (L, F_Skip, Loc);
+         return;
+      end if;
+      F.Expects_Key := True;
+      case F.Kind is
+         when F_Selection =>
+            F.In_List := True;
+            F.List_Count := 0;
+            F.List_Has_Int := False;
+            F.List_Has_Txt := False;
+            --  Items arrive while the sequence's skip frame is on top;
+            --  the scalar/sequence-end handlers redirect them to the
+            --  selection frame below.
+            Push (L, F_Skip, Loc);
+         when others =>
+            --  Sequences outside a selection value are not Phase 1
+            --  (e.g. a list-valued condition); reject explicitly.
+            Fail (L, Load_Unknown_Condition, Loc);
+            Push (L, F_Skip, Loc);
+      end case;
+   end Handle_Seq_Value;
 
    procedure Load_Detection
      (YAML_Text : String;
@@ -157,247 +782,100 @@ package body Sigma_Verdict.Boundary with SPARK_Mode => Off is
       Error     : out Load_Error;
       Detail    : out Natural)
    is
-      P           : Yaml.Parser.Instance;
-      Ev          : EV.Event;
-      State       : Ctx_State := C_Root;
-      Skip_Depth  : Natural := 0;
-      Sel_Index   : Natural := 0;
-      Sel_Count   : Natural := 0;
-      Expects_Key : Boolean := True;
-      Pending_Key : String (1 .. 256) := [others => ' '];
-      Pending_Len : Natural := 0;
-      Cond_Text   : String (1 .. 256) := [others => ' '];
-      Cond_Len    : Natural := 0;
-      In_Cond     : Boolean := False;
-      Seen_Detect : Boolean := False;
-      Ev_Index    : Natural := 0;
-
-      procedure Fail (E : Load_Error) is
-      begin
-         Error := E;
-         Detail := Ev_Index;
-      end Fail;
-
-      function Scalar (E : EV.Event) return String is
-        (E.Content.Value.Data.all);
-
+      P  : Instance;
+      L  : Loader;
+      Ev : Yaml.Event;
    begin
       Rule := E.Empty_Rule;
-      Error := Load_Ok;
-      Detail := 0;
-      if YAML_Text'Length = 0 then
-         Error := Load_Empty_Input;
-         return;
-      end if;
-
       P.Set_Input (YAML_Text);
-      Main : loop
+      Push (L, F_Root, 0);
+      loop
          begin
-            P.Next (Ev);
+            Ev := P.Next;
          exception
             when Yaml.Lexer_Error | Yaml.Parser_Error =>
-               Fail (Load_Syntax);
-               return;
+               Fail (L, Load_YAML_Error,
+                     Natural (P.Current_Lexer_Token_Start.Index));
+               exit;
          end;
-         Ev_Index := Ev_Index + 1;
          case Ev.Kind is
-            when EV.Stream_Start | EV.Document_Start | EV.Document_End | EV.Stream_End =>
+            when Yaml.Stream_End =>
+               exit;
+            when Yaml.Stream_Start | Yaml.Document_Start
+               | Yaml.Document_End | Yaml.Annotation_Start
+               | Yaml.Annotation_End =>
                null;
-            when EV.Mapping_Start =>
-               if Skip_Depth > 0 then
-                  Skip_Depth := Skip_Depth + 1;
-               elsif State = C_Root and then Pending_Len > 0
-                 and then Pending_Key (1 .. Pending_Len) = "detection"
-               then
-                  State := C_Detection;
-                  Seen_Detect := True;
-                  Pending_Len := 0;
-               elsif State = C_Detection and then Pending_Len > 0 then
-                  if Sel_Count >= E.Max_Selections then
-                     Fail (Load_Too_Complex);
-                     return;
-                  end if;
-                  Sel_Count := Sel_Count + 1;
-                  Sel_Index := Sel_Count;
-                  Rule.Sel_Count := Sel_Count;
-                  declare
-                     Ok : Boolean;
-                  begin
-                     Set_Field_Name
-                       (Rule, Sel_Index,
-                        Pending_Key (1 .. Pending_Len), Ok);
-                     if not Ok then
-                        Fail (Load_Overflow);
-                        return;
-                     end if;
-                  end;
-                  State := C_Selection;
-                  Pending_Len := 0;
-               elsif State = C_Selection and then Pending_Len > 0 then
-                  --  Nested map under a field (e.g. EventID: {...}):
-                  --  out of Phase-1 shape.
-                  Fail (Load_Unknown_Shape);
-                  return;
-               elsif State = C_Detection and then Pending_Len = 0 then
-                  --  Anonymous map directly under detection: out of shape.
-                  Fail (Load_Unknown_Shape);
-                  return;
-               else
-                  --  Document-root mapping or metadata map: skip contents.
-                  if State = C_Root and then Pending_Len = 0 then
-                     null;
-                  else
-                     Skip_Depth := 1;
-                  end if;
-               end if;
-               Expects_Key := True;
-            when EV.Mapping_End =>
-               if Skip_Depth > 0 then
-                  Skip_Depth := Skip_Depth - 1;
-               elsif State = C_Selection then
-                  State := C_Detection;
-                  Sel_Index := 0;
-               elsif State = C_Detection then
-                  State := C_Root;
-               end if;
-               Expects_Key := True;
-            when EV.Sequence_Start =>
-               if Skip_Depth > 0 then
-                  Skip_Depth := Skip_Depth + 1;
-               elsif State = C_Selection and then Pending_Len > 0 then
-                  --  List value under a field: Phase 2 (E_Text_List).
-                  Fail (Load_Unsupported);
-                  return;
-               elsif State = C_Detection and then Pending_Len > 0
-                 and then Pending_Key (1 .. Pending_Len) = "condition"
-               then
-                  Fail (Load_Unknown_Condition);
-                  return;
-               elsif State = C_Detection or else State = C_Selection then
-                  Fail (Load_Unknown_Shape);
-                  return;
-               else
-                  Skip_Depth := 1;
-               end if;
-               Expects_Key := True;
-            when EV.Sequence_End =>
-               if Skip_Depth > 0 then
-                  Skip_Depth := Skip_Depth - 1;
-               end if;
-               Expects_Key := True;
-            when EV.Scalar =>
-               if Skip_Depth > 0 then
-                  null;
-               elsif Expects_Key then
-                  if Scalar (Ev)'Length > Pending_Key'Length then
-                     Fail (Load_Overflow);
-                     return;
-                  end if;
-                  Pending_Len := Scalar (Ev)'Length;
-                  Pending_Key (1 .. Pending_Len) := Scalar (Ev);
-                  Expects_Key := False;
-                  if State = C_Detection
-                    and then Pending_Len = 9
-                    and then Pending_Key (1 .. 9) = "condition"
+            when Yaml.Alias =>
+               --  Anchors/aliases are valid YAML but outside Phase 1.
+               Fail (L, Load_YAML_Error,
+                     Natural (Ev.Start_Position.Index));
+               exit;
+            when Yaml.Scalar =>
+               declare
+                  S : constant String := Ev.Content.Value.Data.all;
+                  Plain : constant Boolean :=
+                    Ev.Scalar_Style = Yaml.Plain;
+               begin
+                  --  Route list items to the selection frame below the
+                  --  sequence's skip frame.
+                  if L.Depth >= 2
+                    and then L.Frames (L.Depth).Kind = F_Skip
+                    and then L.Frames (L.Depth - 1).In_List
                   then
-                     In_Cond := True;
-                  end if;
-               else
-                  --  Scalar value for Pending_Key.
-                  if In_Cond then
-                     if Scalar (Ev)'Length > Cond_Text'Length then
-                        Fail (Load_Overflow);
-                        return;
-                     end if;
-                     Cond_Len := Scalar (Ev)'Length;
-                     Cond_Text (1 .. Cond_Len) := Scalar (Ev);
-                     In_Cond := False;
-                     Pending_Len := 0;
-                  elsif State = C_Selection and then Sel_Index > 0 then
-                     declare
-                        Raw      : constant String := Scalar (Ev);
-                        Has_Mod  : Boolean;
-                        Base_Len : Natural;
-                        Mod      : constant E.Modifier_Kind :=
-                          Split_Modifier
-                            (Pending_Key (1 .. Pending_Len), Base_Len, Has_Mod);
-                        Base     : constant String :=
-                          Pending_Key (1 .. Base_Len);
-                        Num      : Integer;
-                        Is_Num   : Boolean := Raw'Length > 0;
-                     begin
-                        for C of Raw loop
-                           if C not in '0' .. '9' then
-                              Is_Num := False;
-                              exit;
-                           end if;
-                        end loop;
-                        if Is_Num then
-                           begin
-                              Num := Integer'Value (Raw);
-                           exception
-                              when Constraint_Error =>
-                                 Fail (Load_Overflow);
-                                 return;
-                           end;
-                        end if;
-                        Add_Field
-                          (Rule, Sel_Index, Base, Mod, Raw,
-                           Is_Num, Num, Error);
-                        if Error /= Load_Ok then
-                           Fail (Error);
-                           return;
-                        end if;
-                     end;
-                     Pending_Len := 0;
-                  elsif State = C_Root or else State = C_Detection then
-                     --  Metadata scalar (title/logsource/...): ignore.
-                     Pending_Len := 0;
+                     Add_List_Item (L, S, Plain,
+                       Natural (Ev.Start_Position.Index));
                   else
-                     Pending_Len := 0;
+                     Handle_Scalar
+                       (L, S, Plain,
+                        Natural (Ev.Start_Position.Index));
                   end if;
-                  Expects_Key := True;
+               end;
+               exit when L.Error /= Load_Ok;
+            when Yaml.Mapping_Start =>
+               Handle_Map_Value (L, Natural (Ev.Start_Position.Index));
+               exit when L.Error /= Load_Ok;
+            when Yaml.Mapping_End =>
+               Pop (L);
+            when Yaml.Sequence_Start =>
+               Handle_Seq_Value (L, Natural (Ev.Start_Position.Index));
+               exit when L.Error /= Load_Ok;
+            when Yaml.Sequence_End =>
+               --  Close the list on the selection frame below the
+               --  sequence's skip frame.
+               if L.Depth >= 2
+                 and then L.Frames (L.Depth).Kind = F_Skip
+                 and then L.Frames (L.Depth - 1).In_List
+               then
+                  L.Frames (L.Depth - 1).In_List := False;
+                  Close_List
+                    (L, L.Depth - 1,
+                     Natural (Ev.Start_Position.Index));
                end if;
-            when EV.Alias =>
-               Fail (Load_Unsupported);
-               return;
+               Pop (L);
+               exit when L.Error /= Load_Ok;
          end case;
-         exit Main when Ev.Kind = EV.Stream_End;
-      end loop Main;
-
-      if not Seen_Detect then
-         Fail (Load_Unknown_Shape);
-         return;
-      end if;
-      if Cond_Len = 0 then
-         Fail (Load_Unknown_Condition);
-         return;
-      end if;
-      --  Resolve the condition: a single selection name for Phase 1.
-      Sel_Index := 0;
-      for I in 1 .. Sel_Count loop
-         if Rule.Selections (I).Name_Len = Cond_Len
-           and then Rule.Selections (I).Name (1 .. Cond_Len) =
-             Cond_Text (1 .. Cond_Len)
-         then
-            Sel_Index := I;
-            exit;
-         end if;
       end loop;
-      if Sel_Index = 0 then
-         Fail (Load_Unknown_Condition);
-         return;
+      if L.Error = Load_Ok then
+         if L.Rule.Sel_Count = 0 then
+            Fail (L, Load_Empty_Rule, 0);
+         elsif not L.Have_Cond then
+            Fail (L, Load_Empty_Rule, 0);
+         else
+            Parse_Condition (L);
+         end if;
       end if;
-      if Rule.Node_Count + 1 > E.Max_Condition_Nodes then
-         Fail (Load_Too_Complex);
-         return;
+      if L.Error = Load_Ok then
+         Rule := L.Rule;
+      else
+         Rule := E.Empty_Rule;
       end if;
-      Rule.Node_Count := Rule.Node_Count + 1;
-      Rule.Nodes (Rule.Node_Count) :=
-        (Kind => E.N_Ref, Left => 0, Right => 0, Sel_Index => Sel_Index);
-      Rule.Root := Rule.Node_Count;
-      Error := Load_Ok;
-      Detail := 0;
+      Error := L.Error;
+      Detail := L.Detail;
+   exception
+      when others =>
+         Rule := E.Empty_Rule;
+         Error := Load_Internal;
+         Detail := 0;
    end Load_Detection;
 
 end Sigma_Verdict.Boundary;
