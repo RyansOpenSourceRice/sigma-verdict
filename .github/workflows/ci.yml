@@ -56,12 +56,20 @@ jobs:
           "$HOME/.local/bin/alr" --version
 
       - name: Add Alire indexes
-        #  The default community index ships with alr; flyology hosts
-        #  adayaml. The toolchain is auto-selected on first use (newest
-        #  GNAT/GPRbuild); -n on every alr call keeps its download
-        #  non-interactive (a prompt on a headless runner aborts the job).
+        #  A fresh runner's default community index predates the
+        #  gnat_native assistant, so pin the known-good branch (same as
+        #  the day-one local setup) before adding flyology (adayaml).
+        #  -n everywhere keeps downloads non-interactive.
         run: |
+          alr -n index --del community
+          alr -n index --add git+https://github.com/alire-project/alire-index#stable-1.4.0 --name community
           alr -n index --add git+https://github.com/flyology-ada/alire-index.git --name flyology
+
+      - name: Select toolchain (pinned latest stable)
+        #  16.1.0/26.0.1 are the newest stable releases with Linux
+        #  binaries (16.2.0 is a darwin-only pre-release). Pinned for a
+        #  deterministic gate; revisit when 16.2 goes stable.
+        run: alr -n toolchain --select gnat_native=16.1.0 gprbuild=26.0.1
 
       - name: Full local gate (build + tests + flow proof)
         run: sh scripts/verify.sh
@@ -101,10 +109,15 @@ jobs:
           "$HOME/.local/bin/alr" --version
 
       - name: Add Alire indexes
-        #  Same as build-test-prove: flyology hosts adayaml, toolchain
-        #  auto-selects newest under -n.
+        #  Same pin as build-test-prove: fresh default community index
+        #  lacks gnat_native; flyology hosts adayaml.
         run: |
+          alr -n index --del community
+          alr -n index --add git+https://github.com/alire-project/alire-index#stable-1.4.0 --name community
           alr -n index --add git+https://github.com/flyology-ada/alire-index.git --name flyology
+
+      - name: Select toolchain (pinned latest stable)
+        run: alr -n toolchain --select gnat_native=16.1.0 gprbuild=26.0.1
 
       - name: GNATprove Silver level 2 (proof-only project)
         run: alr -n exec -- gnatprove -P proof/spark_core.gpr --mode=silver --level=2 --checks-as-errors=on
