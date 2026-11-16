@@ -62,4 +62,28 @@ begin
      (Kind => V_Text, Text_Value => To_Event_Text ("C:\x hostname").Value);
    R := Evaluate (Rule, Event);
    Check (R.Error = Error_None and then not R.Matched, "text mismatch");
+
+   --  Regression: endswith with a needle longer than the haystack must
+   --  fail closed (no match, no error), never raise on the offset
+   --  subtraction.
+   Rule.Selections (1).Fields (2) :=
+     (Field     => To_Field_Name ("CommandLine").Value,
+      Modifiers => (Count => 1, Items => [1 => Mod_Endswith,
+                                          others => Mod_None]),
+      Expected  => (Kind   => E_Text,
+                    Single => To_Value_Text ("whoami /all plus extra").Value));
+   Event.Fields (2).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("whoami").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "endswith longer needle");
+
+   --  Sanity: a genuine endswith still matches.
+   Rule.Selections (1).Fields (2).Expected :=
+     (Kind   => E_Text,
+      Single => To_Value_Text ("whoami").Value);
+   Event.Fields (2).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("run whoami").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "endswith match");
 end Smoke;
