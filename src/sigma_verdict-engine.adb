@@ -77,7 +77,7 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
    function Same_Word (A, B : String) return Boolean is
      (A'Length = B'Length
       and then (for all I in 0 .. A'Length - 1 =>
-                  A (A'First + I) = B (B'First + I))); 
+                  A (A'First + I) = B (B'First + I)));
 
    function Parse_Modifier (Token : String) return Modifier_Kind is
    begin
