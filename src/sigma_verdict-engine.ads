@@ -40,25 +40,31 @@ package Sigma_Verdict.Engine with SPARK_Mode is
    ----------------
 
    --  Bounded, blank-padded text. Only Data (1 .. Length) is significant.
+   --  The predicate pins Length to the buffer so every slice the core
+   --  takes is provably in range; only the constructors can build one.
    type Field_Name is record
       Length : Natural := 0;
       Data   : String (1 .. Max_Field_Length) := [others => ' '];
-   end record;
+   end record
+     with Dynamic_Predicate => Field_Name.Length <= Max_Field_Length;
 
    type Value_Text is record
       Length : Natural := 0;
       Data   : String (1 .. Max_Value_Length) := [others => ' '];
-   end record;
+   end record
+     with Dynamic_Predicate => Value_Text.Length <= Max_Value_Length;
 
    type Event_Text is record
       Length : Natural := 0;
       Data   : String (1 .. Max_Event_Value_Length) := [others => ' '];
-   end record;
+   end record
+     with Dynamic_Predicate => Event_Text.Length <= Max_Event_Value_Length;
 
    type Pattern_Text is record
       Length : Natural := 0;
       Data   : String (1 .. Max_Pattern_Length) := [others => ' '];
-   end record;
+   end record
+     with Dynamic_Predicate => Pattern_Text.Length <= Max_Pattern_Length;
 
    --  Constructor results: Ok = False means the input exceeded capacity.
    type Field_Result is record
