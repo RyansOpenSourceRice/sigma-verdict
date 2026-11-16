@@ -112,6 +112,17 @@ package body Sigma_Verdict.Boundary with SPARK_Mode => Off is
       end if;
    end Pop;
 
+   function Fold_Char (C : Character) return Character is
+     (if C in 'A' .. 'Z'
+      then Character'Val (Character'Pos (C) + 32)
+      else C);
+
+   function Same_Folded (A, B : String) return Boolean is
+     (A'Length = B'Length
+      and then (for all I in 0 .. A'Length - 1 =>
+                  Fold_Char (A (A'First + I)) =
+                    Fold_Char (B (B'First + I))));
+
    --  Split "CommandLine|windash|contains" into field name + modifiers.
    procedure Parse_Field_Key
      (L         : in out Loader;
@@ -239,6 +250,26 @@ package body Sigma_Verdict.Boundary with SPARK_Mode => Off is
       if not OK then
          return;
       end if;
+      if E.Has_Modifier (Mods, E.Mod_Exists) then
+         --  `exists` is standalone with a boolean value; anything else
+         --  is a malformed rule, rejected here rather than guessed at.
+         if Mods.Count /= 1 then
+            Fail (L, Load_Bad_Value, Loc);
+            return;
+         end if;
+         if Same_Folded (Text, "true") then
+            F := (Field => Field, Modifiers => Mods,
+                  Expected => (Kind => E.E_Int, Int_Value => 1));
+         elsif Same_Folded (Text, "false") then
+            F := (Field => Field, Modifiers => Mods,
+                  Expected => (Kind => E.E_Int, Int_Value => 0));
+         else
+            Fail (L, Load_Bad_Value, Loc);
+            return;
+         end if;
+         Append_Field (L, Sel, F, Loc);
+         return;
+      end if;
       Wants_Pattern := False;
       for I in 1 .. Mods.Count loop
          if Mods.Items (I) in E.Mod_Re | E.Mod_Re_I | E.Mod_Re_M
@@ -292,18 +323,29 @@ package body Sigma_Verdict.Boundary with SPARK_Mode => Off is
    end Add_Scalar_Field;
 
    procedure Add_List_Item
-     (L : in out Loader; Text : String; Is_Plain : Boolean; Loc : Natural)
+     (L   : in out Loader;
+      Idx : Natural;
+      Text : String; Is_Plain : Boolean; Loc : Natural)
    is
-      F : Frame renames L.Frames (L.Depth);
+      --  Idx is the selection frame owning the list: list scalars
+      --  arrive while the sequence's skip frame is on top, so the
+      --  top frame is NOT the accumulator (wrong-frame items used to
+      --  vanish into the skip frame, loading every YAML list empty).
+      F : Frame renames L.Frames (Idx);
    begin
       if F.List_Count >= Limits.Default_Values_Per_Sel then
          Fail (L, Load_Too_Many_Values, Loc);
          return;
       end if;
       if Is_Plain then
+         declare
+            V : Integer;
          begin
+            --  Convert first: incrementing before converting used to
+            --  leak phantom empty items on Constraint_Error.
+            V := Integer'Value (Text);
             F.List_Count := F.List_Count + 1;
-            F.List_Ints (F.List_Count) := Integer'Value (Text);
+            F.List_Ints (F.List_Count) := V;
             F.List_Has_Int := True;
             return;
          exception
@@ -340,6 +382,11 @@ package body Sigma_Verdict.Boundary with SPARK_Mode => Off is
       Parse_Field_Key
         (L, F.Key (1 .. F.Key_Len), Loc, Field, Mods, OK);
       if not OK then
+         return;
+      end if;
+      if E.Has_Modifier (Mods, E.Mod_Exists) then
+         --  Presence never takes a list value.
+         Fail (L, Load_Bad_Value, Loc);
          return;
       end if;
       if F.List_Has_Int then
@@ -664,7 +711,7 @@ package body Sigma_Verdict.Boundary with SPARK_Mode => Off is
          return;
       end if;
       if F.In_List then
-         Add_List_Item (L, Text, Is_Plain, Loc);
+         Add_List_Item (L, L.Depth, Text, Is_Plain, Loc);
          return;
       end if;
       if F.Expects_Key then
@@ -822,7 +869,7 @@ package body Sigma_Verdict.Boundary with SPARK_Mode => Off is
                     and then L.Frames (L.Depth).Kind = F_Skip
                     and then L.Frames (L.Depth - 1).In_List
                   then
-                     Add_List_Item (L, S, Plain,
+                     Add_List_Item (L, L.Depth - 1, S, Plain,
                        Natural (Ev.Start_Position.Index));
                   else
                      Handle_Scalar

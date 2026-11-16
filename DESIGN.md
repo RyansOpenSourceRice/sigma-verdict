@@ -25,10 +25,13 @@ YAML text --[boundary, SPARK off]--> Compiled_Rule --[core, SPARK Silver]--> Eva
   case-insensitive fold. No `GNAT.Regpat` (backtracking ReDoS,
   AdaCore Gem #25).
 - Full `Modifier_Kind` enumeration designed in from day one
-  (`https://sigmahq.io/docs/basics/modifiers.html`); Phase 1 evaluates
-  bare/`contains`/`startswith`/`endswith`, everything else
-  (`re`, wildcards, `windash`, `wide`, `base64*`, `cidr`, comparisons,
-  `all`, `exists`, `fieldref`, `expand`, `near`, `count`) answers
+  (`https://sigmahq.io/docs/basics/modifiers.html`); Phase 1a evaluates
+  bare/`contains`/`startswith`/`endswith` plus the structural flags
+  (`cased`, `all`, `exists`). Chains with several matchers fail closed
+  (no silent shadowing); `exists` loads only standalone with a boolean
+  value (`Load_Bad_Value` otherwise). Everything else (`re`,
+  wildcards, `windash`, `wide`, `base64*`, `cidr`, comparisons,
+  `fieldref`, `expand`, `near`, `aggregation`) answers
   `Error_Unsupported_*` — fail-closed, never silently ignored.
 - Condition tree (`Compiled_Rule.Nodes`) answers `1 of`/`all of`;
   `near`/`count` reserved as explicit errors.

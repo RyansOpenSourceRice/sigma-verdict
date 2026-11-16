@@ -145,11 +145,32 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
       Ok := True;
    end Add_Modifier;
 
-   function Chain_Supported (Set : Modifier_Set) return Boolean is
+   function Has_Modifier
+     (Set : Modifier_Set; M : Modifier_Kind) return Boolean
+   is
    begin
       for I in 1 .. Set.Count loop
          pragma Loop_Invariant (Set.Count <= Max_Modifiers_Per_Field);
-         if not Is_Supported_Modifier (Set.Items (I)) then
+         if Set.Items (I) = M then
+            return True;
+         end if;
+      end loop;
+      return False;
+   end Has_Modifier;
+
+   function Chain_Supported (Set : Modifier_Set) return Boolean is
+      Seen_Matcher : Boolean := False;
+   begin
+      for I in 1 .. Set.Count loop
+         pragma Loop_Invariant (Set.Count <= Max_Modifiers_Per_Field);
+         if Is_Supported_Modifier (Set.Items (I)) then
+            --  At most one matching semantic per chain; several would
+            --  silently shadow each other, so the chain fails closed.
+            if Seen_Matcher then
+               return False;
+            end if;
+            Seen_Matcher := True;
+         elsif Set.Items (I) not in Mod_Cased | Mod_All | Mod_Exists then
             return False;
          end if;
       end loop;
@@ -160,15 +181,18 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
    --  Matching --
    ----------------
 
-   function Fold (C : Character) return Character is
-     (if C in 'A' .. 'Z'
+   function Fold (C : Character; Sensitive : Boolean) return Character is
+     (if (not Sensitive) and then C in 'A' .. 'Z'
       then Character'Val (Character'Pos (C) + 32)
       else C);
 
-   function Equal_Folded (A, B : String) return Boolean is
+   function Equal_Folded
+     (A, B : String; Sensitive : Boolean) return Boolean
+   is
      (A'Length = B'Length
       and then (for all I in 0 .. A'Length - 1 =>
-                  Fold (A (A'First + I)) = Fold (B (B'First + I))));
+                  Fold (A (A'First + I), Sensitive) =
+                    Fold (B (B'First + I), Sensitive)));
 
    function Same_Bytes (A, B : String) return Boolean is
      (A'Length = B'Length
@@ -179,7 +203,9 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
      (A.Length = B.Length
       and then Same_Bytes (A.Data (1 .. A.Length), B.Data (1 .. B.Length)));
 
-   function Contains_At (Haystack, Needle : String) return Boolean is
+   function Contains_At
+     (Haystack, Needle : String; Sensitive : Boolean) return Boolean
+   is
       Match : Boolean;
    begin
       if Needle'Length = 0 then
@@ -193,8 +219,8 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
          for K in 0 .. Needle'Length - 1 loop
             pragma Loop_Invariant (Start <= Haystack'Length - Needle'Length);
             pragma Loop_Invariant (K <= Needle'Length - 1);
-            if Fold (Haystack (Haystack'First + Start + K)) /=
-              Fold (Needle (Needle'First + K))
+            if Fold (Haystack (Haystack'First + Start + K), Sensitive) /=
+              Fold (Needle (Needle'First + K), Sensitive)
             then
                Match := False;
                exit;
@@ -208,7 +234,9 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
       return False;
    end Contains_At;
 
-   function Starts_With_At (Haystack, Needle : String) return Boolean is
+   function Starts_With_At
+     (Haystack, Needle : String; Sensitive : Boolean) return Boolean
+   is
    begin
       if Needle'Length = 0 then
          return True;
@@ -218,8 +246,8 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
       end if;
       for K in 0 .. Needle'Length - 1 loop
          pragma Loop_Invariant (Needle'Length <= Haystack'Length);
-         if Fold (Haystack (Haystack'First + K)) /=
-           Fold (Needle (Needle'First + K))
+         if Fold (Haystack (Haystack'First + K), Sensitive) /=
+           Fold (Needle (Needle'First + K), Sensitive)
          then
             return False;
          end if;
@@ -227,7 +255,9 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
       return True;
    end Starts_With_At;
 
-   function Ends_With_At (Haystack, Needle : String) return Boolean is
+   function Ends_With_At
+     (Haystack, Needle : String; Sensitive : Boolean) return Boolean
+   is
    begin
       if Needle'Length = 0 then
          return True;
@@ -243,8 +273,8 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
          for K in 0 .. Needle'Length - 1 loop
             pragma Loop_Invariant (Offset = Haystack'Length - Needle'Length);
             pragma Loop_Invariant (Offset + K <= Haystack'Length);
-            if Fold (Haystack (Haystack'First + Offset + K)) /=
-              Fold (Needle (Needle'First + K))
+            if Fold (Haystack (Haystack'First + Offset + K), Sensitive) /=
+              Fold (Needle (Needle'First + K), Sensitive)
             then
                return False;
             end if;
@@ -279,14 +309,14 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
    end Find_Field;
 
    --  Match one expected text against one haystack under the chain's
-   --  single matcher. The chain holds at most one matching semantic in
-   --  Phase 1 (the boundary rejects empty-vs-multiple matcher chains
-   --  beyond exact equality); the LAST matcher token wins if several
-   --  are present, and evaluation stays deterministic either way.
+   --  single matcher. Chain_Supported guarantees at most one matching
+   --  semantic reaches here (empty means exact equality); `cased`
+   --  selects case-sensitive comparison, otherwise folding applies.
    function Text_Matches
      (Haystack : String; Needle : String; Set : Modifier_Set) return Boolean
    is
-      Kind : Modifier_Kind := Mod_None;
+      Kind      : Modifier_Kind := Mod_None;
+      Sensitive : constant Boolean := Has_Modifier (Set, Mod_Cased);
    begin
       for I in 1 .. Set.Count loop
          pragma Loop_Invariant (Set.Count <= Max_Modifiers_Per_Field);
@@ -296,13 +326,13 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
       end loop;
       case Kind is
          when Mod_Contains =>
-            return Contains_At (Haystack, Needle);
+            return Contains_At (Haystack, Needle, Sensitive);
          when Mod_Startswith =>
-            return Starts_With_At (Haystack, Needle);
+            return Starts_With_At (Haystack, Needle, Sensitive);
          when Mod_Endswith =>
-            return Ends_With_At (Haystack, Needle);
+            return Ends_With_At (Haystack, Needle, Sensitive);
          when others =>
-            return Equal_Folded (Haystack, Needle);
+            return Equal_Folded (Haystack, Needle, Sensitive);
       end case;
    end Text_Matches;
 
@@ -311,6 +341,36 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
    is
       Slot : constant Natural := Find_Field (Event, C.Field);
    begin
+      --  Presence check. The boundary only ever loads sole-modifier
+      --  boolean values here; anything else fails closed as defence
+      --  in depth (hand-built rules bypass the loader).
+      if Has_Modifier (C.Modifiers, Mod_Exists) then
+         if C.Modifiers.Count /= 1 then
+            return (Matched => False, Error => Error_Unsupported_Modifier);
+         end if;
+         case C.Expected.Kind is
+            when E_Int =>
+               return (Matched => (Slot /= 0) = (C.Expected.Int_Value /= 0),
+                       Error   => Error_None);
+            when E_Text =>
+               declare
+                  T : constant String :=
+                    C.Expected.Single.Data (1 .. C.Expected.Single.Length);
+               begin
+                  if Equal_Folded (T, "true", False) then
+                     return (Matched => Slot /= 0, Error => Error_None);
+                  elsif Equal_Folded (T, "false", False) then
+                     return (Matched => Slot = 0, Error => Error_None);
+                  else
+                     return (Matched => False,
+                             Error   => Error_Unsupported_Modifier);
+                  end if;
+               end;
+            when E_Int_List | E_Text_List | E_Pattern =>
+               return (Matched => False,
+                       Error   => Error_Unsupported_Modifier);
+         end case;
+      end if;
       if not Chain_Supported (C.Modifiers) then
          return (Matched => False, Error => Error_Unsupported_Modifier);
       end if;
@@ -333,6 +393,20 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
             when E_Int_List =>
                if EV.Kind /= V_Int then
                   return (Matched => False, Error => Error_None);
+               end if;
+               if C.Expected.Int_Count = 0 then
+                  --  An empty list matches nothing either way.
+                  return (Matched => False, Error => Error_None);
+               end if;
+               if Has_Modifier (C.Modifiers, Mod_All) then
+                  for I in 1 .. C.Expected.Int_Count loop
+                     pragma Loop_Invariant
+                       (C.Expected.Int_Count <= Max_Values_Per_Sel);
+                     if EV.Int_Value /= C.Expected.Ints (I) then
+                        return (Matched => False, Error => Error_None);
+                     end if;
+                  end loop;
+                  return (Matched => True, Error => Error_None);
                end if;
                for I in 1 .. C.Expected.Int_Count loop
                   pragma Loop_Invariant
@@ -357,6 +431,25 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
             when E_Text_List =>
                if EV.Kind /= V_Text then
                   return (Matched => False, Error => Error_None);
+               end if;
+               if C.Expected.Count = 0 then
+                  --  An empty list matches nothing either way.
+                  return (Matched => False, Error => Error_None);
+               end if;
+               if Has_Modifier (C.Modifiers, Mod_All) then
+                  for I in 1 .. C.Expected.Count loop
+                     pragma Loop_Invariant
+                       (C.Expected.Count <= Max_Values_Per_Sel);
+                     if not Text_Matches
+                       (EV.Text_Value.Data (1 .. EV.Text_Value.Length),
+                        C.Expected.Items (I).Data
+                          (1 .. C.Expected.Items (I).Length),
+                        C.Modifiers)
+                     then
+                        return (Matched => False, Error => Error_None);
+                     end if;
+                  end loop;
+                  return (Matched => True, Error => Error_None);
                end if;
                for I in 1 .. C.Expected.Count loop
                   pragma Loop_Invariant

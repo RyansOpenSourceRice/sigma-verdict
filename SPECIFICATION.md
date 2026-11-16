@@ -18,7 +18,9 @@
 | Surface | Phase 1 (now) | Later |
 |---|---|---|
 | Matchers: exact, `contains`, `startswith`, `endswith` | evaluate | — |
-| Views: `windash`, `wide`/`utf16*`, `base64*`, `cased`, `all`, `exists` | `Unsupported` | P1 |
+| Flags: `cased`, `all`, `exists` | evaluate | — |
+| Illegal chains (several matchers, views, patterns) | `Unsupported` | — |
+| Views: `windash`, `wide`/`utf16*`, `base64*` | `Unsupported` | P1b |
 | `gt`/`gte`/`lt`/`lte`, `cidr` (v4+v6) | `Unsupported` | P2 |
 | Wildcards (implicit + explicit), `re` subset, `fieldref`, `expand` | `Unsupported` | P3 |
 | Conditions: `AND`/`OR`/`NOT`, `1 of`/`all of`, parens, `count()` | parens/`count()` `Unsupported` | P4 |

@@ -1,0 +1,9 @@
+title: Case-sensitive WHOAMI match test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4728
+    CommandLine|cased|contains: 'WHOAMI'
+  condition: selection

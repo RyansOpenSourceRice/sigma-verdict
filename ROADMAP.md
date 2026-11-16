@@ -22,13 +22,26 @@ Locked decisions (2026-11-16):
 - `prove-silver` fully green, not just tracking.
 - Exit: silver level 2 `--checks-as-errors=on` clean on `dev`.
 
-## P1 — Value-view modifiers (first build)
-`windash` (fold `- / – — ―`), `wide`/`utf16le`/`utf16be` views,
-`base64`/`base64offset` expansion, `cased`, `all`, `exists`.
-Expansion in `boundary/` (untrusted, `SPARK_Mode (Off)`); core stays
-pure over expanded views with the existing linear matchers. New
-capacity knob only if required; overflow is `Too_Long`, never
-truncation.
+## P1a — Structural modifiers (first build)
+`cased` (opt-out of ASCII folding), `all` (list conjunction),
+`exists` (standalone boolean presence), plus the chain legality gate:
+at most one matcher token per chain, illegal combos fail closed as
+`Unsupported` (no silent shadowing). No new buffers, no new proof
+machinery. `exists` is standalone with a boolean value at load.
+
+## P1b — Value views
+`windash` (placeholder-exact per the pySigma reference: only ASCII
+`-`/`/` at non-word-boundary positions expand, 5-way, variable stride
+in the matcher — canonical folding would over-match, so no
+canonicalization), `wide`/`utf16le`/`utf16be` (NUL-interleaved views,
+ASCII-only needles, rejected at load otherwise),
+`utf16` (BOM variant — needs a new `Modifier_Kind` literal),
+`base64` (encoded form only, never the plain value),
+`base64offset` (exact 3-phase construction per pySigma: prepend 0/1/2
+spaces, encode, cut per offset). View derivation is pure, bounded and
+total, so it lives in the core where SPARK can prove it; the boundary
+only validates chain legality. `wide`-family and `base64`-family never
+mix in one chain (`Unsupported`).
 
 ## P2 — Comparisons + CIDR (v4 + v6)
 `gt`/`gte`/`lt`/`lte` on the `E_Int` path; 32-bit and 128-bit prefix

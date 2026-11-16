@@ -3,11 +3,12 @@
 --
 --  Deterministic Sigma detection evaluator (SPARK Silver core).
 --
---  One generic package holds the whole trusted core so there are no
---  formal-package dependencies to prove across: AST types, the
---  Phase 1 matchers (exact/contains/startswith/endswith, ASCII
---  case-insensitive per the Sigma specification) and the condition
---  evaluator (AND/OR/NOT plus "1 of"/"all of" aggregations).
+   --  One generic package holds the whole trusted core so there are no
+   --  formal-package dependencies to prove across: AST types, the
+   --  Phase 1 matchers (exact/contains/startswith/endswith, ASCII
+   --  case-insensitive per the Sigma specification unless `cased`),
+   --  the structural flags (`all` conjunction, `exists` presence) and
+   --  the condition evaluator (AND/OR/NOT plus "1 of"/"all of").
 --
 --  The AST deliberately carries the FULL Sigma surface: the complete
 --  Modifier_Kind enumeration (including re/wildcard/windash/wide/
@@ -100,9 +101,10 @@ package Sigma_Verdict.Engine with SPARK_Mode is
    -----------------
 
    --  Full Sigma modifier surface (sigmahq.io/docs/basics/modifiers).
-   --  Only the four Phase 1 matchers evaluate; the rest (including
-   --  Mod_Unknown, which the boundary must reject at load) fail closed
-   --  with Error_Unsupported_Modifier.
+   --  Phase 1a evaluates matchers (bare/contains/startswith/endswith),
+   --  the case flag (cased), list conjunction (all) and presence
+   --  (exists); the rest (including Mod_Unknown, which the boundary
+   --  must reject at load) fail closed with Error_Unsupported_Modifier.
    type Modifier_Kind is
      (Mod_None,
       Mod_Contains, Mod_Startswith, Mod_Endswith,
@@ -145,9 +147,15 @@ package Sigma_Verdict.Engine with SPARK_Mode is
      (Set : in out Modifier_Set; M : in Modifier_Kind; Ok : out Boolean);
    --  Appends M; Ok = False when the chain is already full.
 
+   function Has_Modifier (Set : Modifier_Set; M : Modifier_Kind) return Boolean;
+   --  True iff M occurs anywhere in the chain.
+
    function Chain_Supported (Set : Modifier_Set) return Boolean;
-   --  True iff every chained modifier is a Phase 1 matcher
-   --  (empty chains count as supported: exact equality).
+   --  True iff the chain holds at most one matcher token
+   --  (bare/contains/startswith/endswith) plus any combination of the
+   --  structural flags (cased/all/exists). Anything else — views,
+   --  comparisons, patterns, unknown tokens, or several matchers —
+   --  fails closed with Error_Unsupported_Modifier.
 
    ----------------
    --  Selections --

@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 ### Fixed
+- YAML list values now accumulate on the owning selection frame
+  (scalars arrive while the sequence's skip frame is on top) and
+  `Add_List_Item` converts before counting: previously every YAML
+  list loaded empty with phantom slots, so list rules could never
+  match (found by the new `contains|all` end-to-end test).
 - `Field_Name` now carries `Dynamic_Predicate (Length <= Max_Field_Length)`:
   out-of-range names fail fast at construction instead of surfacing as
   unprovable slices (closes silver high + 2 mediums). `Value_Text`,
@@ -18,6 +23,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `Constraint_Error` (found by silver level 2; regression-covered in
   `smoke`).
 ### Added
+- `cased` (case-sensitive matching), `all` (list conjunction) and
+  `exists` (standalone boolean presence) modifiers, end to end from
+  YAML. Chains with more than one matcher token now fail closed as
+  `Unsupported` instead of last-wins; malformed `exists` rules are
+  rejected at load with the new `Load_Bad_Value`.
 - Generic SPARK Silver core: bounded selections, `contains`/`startswith`/
   `endswith` linear matchers, condition trees with `1 of`/`all of`.
 - adayaml boundary loader with explicit `Load_Error` on any lossy input.
