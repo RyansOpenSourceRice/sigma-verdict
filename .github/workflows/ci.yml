@@ -49,6 +49,7 @@ jobs:
         run: |
           mkdir -p "$HOME/.local/bin"
           curl -sL -o /tmp/alire.zip https://github.com/alire-project/alire/releases/download/v2.1.1/alr-2.1.1-bin-x86_64-linux.zip
+          rm -rf /tmp/alire.zip -d /tmp/alire-dist
           rm -rf /tmp/alire-dist && mkdir -p /tmp/alire-dist
           unzip -o -q /tmp/alire.zip -d /tmp/alire-dist
           install -m 0755 /tmp/alire-dist/bin/alr "$HOME/.local/bin/alr"
@@ -56,15 +57,12 @@ jobs:
           "$HOME/.local/bin/alr" --version
 
       - name: Add Alire indexes
+        #  The default community index ships with alr; flyology hosts
+        #  adayaml. The toolchain is auto-selected on first use (newest
+        #  GNAT/GPRbuild); -n on every alr call keeps its download
+        #  non-interactive (a prompt on a headless runner aborts the job).
         run: |
           alr -n index --add git+https://github.com/flyology-ada/alire-index.git --name flyology
-
-      - name: Select latest toolchain (non-interactive)
-        #  Bare names resolve to the newest available releases, so CI
-        #  always builds with the latest GNAT/GPRbuild. -n auto-confirms
-        #  the download instead of prompting (a prompt on a headless
-        #  runner aborts the job).
-        run: alr -n toolchain --select gnat_native gprbuild
 
       - name: Full local gate (build + tests + flow proof)
         run: sh scripts/verify.sh
@@ -104,11 +102,10 @@ jobs:
           "$HOME/.local/bin/alr" --version
 
       - name: Add Alire indexes
+        #  Same as build-test-prove: flyology hosts adayaml, toolchain
+        #  auto-selects newest under -n.
         run: |
           alr -n index --add git+https://github.com/flyology-ada/alire-index.git --name flyology
-
-      - name: Select latest toolchain (non-interactive)
-        run: alr -n toolchain --select gnat_native gprbuild
 
       - name: GNATprove Silver level 2 (proof-only project)
         run: alr -n exec -- gnatprove -P proof/spark_core.gpr --mode=silver --level=2 --checks-as-errors=on
