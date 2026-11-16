@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 ### Fixed
+- `Field_Name` now carries `Dynamic_Predicate (Length <= Max_Field_Length)`:
+  out-of-range names fail fast at construction instead of surfacing as
+  unprovable slices (closes silver high + 2 mediums). `Value_Text`,
+  `Event_Text` and `Pattern_Text` carry the same bound invariant
+  (closes the `Text_Matches`-site slice mediums).
+- `Ends_With_At` loop carries an `Offset + K` bound invariant for the
+  silver prover (closes 8 mediums).
 - `Ends_With_At` elaborates its offset only after the length guards: a
   needle longer than the haystack returns no-match instead of raising
   `Constraint_Error` (found by silver level 2; regression-covered in
