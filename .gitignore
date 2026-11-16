@@ -3,3 +3,12 @@
 
 # Ada Library Information
 *.ali
+
+# Alire / GPRbuild outputs (regenerable)
+obj/
+lib/
+bin/
+alire/
+config/
+*.lexch
+*.bexch

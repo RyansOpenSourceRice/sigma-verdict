@@ -1,0 +1,9 @@
+title: Whoami execution via 4728 implict test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4728
+    CommandLine|contains: 'whoami'
+  condition: selection
