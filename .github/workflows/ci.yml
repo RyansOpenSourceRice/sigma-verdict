@@ -56,12 +56,11 @@ jobs:
           "$HOME/.local/bin/alr" --version
 
       - name: Add Alire indexes
-        #  A fresh runner's default community index predates the
-        #  gnat_native assistant, so pin the known-good branch (same as
-        #  the day-one local setup) before adding flyology (adayaml).
+        #  A fresh alr ships with no indexes at all, so add both
+        #  explicitly: community pinned to the known-good branch (same
+        #  as the day-one local setup), plus flyology (adayaml).
         #  -n everywhere keeps downloads non-interactive.
         run: |
-          alr -n index --del community
           alr -n index --add git+https://github.com/alire-project/alire-index#stable-1.4.0 --name community
           alr -n index --add git+https://github.com/flyology-ada/alire-index.git --name flyology
 
@@ -109,10 +108,8 @@ jobs:
           "$HOME/.local/bin/alr" --version
 
       - name: Add Alire indexes
-        #  Same pin as build-test-prove: fresh default community index
-        #  lacks gnat_native; flyology hosts adayaml.
+        #  Same as build-test-prove: pinned community + flyology.
         run: |
-          alr -n index --del community
           alr -n index --add git+https://github.com/alire-project/alire-index#stable-1.4.0 --name community
           alr -n index --add git+https://github.com/flyology-ada/alire-index.git --name flyology
 
