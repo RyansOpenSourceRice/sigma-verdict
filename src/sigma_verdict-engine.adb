@@ -228,7 +228,6 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
    end Starts_With_At;
 
    function Ends_With_At (Haystack, Needle : String) return Boolean is
-      Offset : constant Natural := Haystack'Length - Needle'Length;
    begin
       if Needle'Length = 0 then
          return True;
@@ -236,15 +235,21 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
       if Needle'Length > Haystack'Length then
          return False;
       end if;
-      for K in 0 .. Needle'Length - 1 loop
-         pragma Loop_Invariant (Offset = Haystack'Length - Needle'Length);
-         if Fold (Haystack (Haystack'First + Offset + K)) /=
-           Fold (Needle (Needle'First + K))
-         then
-            return False;
-         end if;
-      end loop;
-      return True;
+      --  Offset is elaborated only after the guards above, so the
+      --  subtraction cannot underflow (fail-closed, no exception).
+      declare
+         Offset : constant Natural := Haystack'Length - Needle'Length;
+      begin
+         for K in 0 .. Needle'Length - 1 loop
+            pragma Loop_Invariant (Offset = Haystack'Length - Needle'Length);
+            if Fold (Haystack (Haystack'First + Offset + K)) /=
+              Fold (Needle (Needle'First + K))
+            then
+               return False;
+            end if;
+         end loop;
+         return True;
+      end;
    end Ends_With_At;
 
    function Has_Prefix (Name, Prefix : Field_Name) return Boolean is
@@ -260,284 +265,15 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
    end Has_Prefix;
 
    function Find_Field
-     (Event : Event_Record; Name : Field_Name) return Natural
+     (Event : Event_Record; Name : Field_Name; Loc : Natural)
    is
+      S : E.Selection renames L.Rule.Selections (Sel);
    begin
-      for I in 1 .. Event.Count loop
-         pragma Loop_Invariant (Event.Count <= Max_Event_Fields);
-         if Field_Equal (Event.Fields (I).Name, Name) then
-            return I;
-         end if;
-      end loop;
-      return 0;
-   end Find_Field;
-
-   --  Match one expected text against one haystack under the chain's
-   --  single matcher. The chain holds at most one matching semantic in
-   --  Phase 1 (the boundary rejects empty-vs-multiple matcher chains
-   --  beyond exact equality); the LAST matcher token wins if several
-   --  are present, and evaluation stays deterministic either way.
-   function Text_Matches
-     (Haystack : String; Needle : String; Set : Modifier_Set) return Boolean
-   is
-      Kind : Modifier_Kind := Mod_None;
-   begin
-      for I in 1 .. Set.Count loop
-         pragma Loop_Invariant (Set.Count <= Max_Modifiers_Per_Field);
-         if Set.Items (I) in Mod_Contains | Mod_Startswith | Mod_Endswith then
-            Kind := Set.Items (I);
-         end if;
-      end loop;
-      case Kind is
-         when Mod_Contains =>
-            return Contains_At (Haystack, Needle);
-         when Mod_Startswith =>
-            return Starts_With_At (Haystack, Needle);
-         when Mod_Endswith =>
-            return Ends_With_At (Haystack, Needle);
-         when others =>
-            return Equal_Folded (Haystack, Needle);
-      end case;
-   end Text_Matches;
-
-   function Match_Field
-     (C : Field_Constraint; Event : Event_Record) return Eval_Result
-   is
-      Slot : constant Natural := Find_Field (Event, C.Field);
-   begin
-      if not Chain_Supported (C.Modifiers) then
-         return (Matched => False, Error => Error_Unsupported_Modifier);
+      if not E.Can_Add_Field (S) then
+         Fail (L, Load_Too_Many_Fields, Loc);
+         return;
       end if;
-      if C.Expected.Kind = E_Pattern then
-         return (Matched => False, Error => Error_Unsupported_Modifier);
-      end if;
-      if Slot = 0 then
-         --  Absent field: no match, no error (standard Sigma semantics).
-         return (Matched => False, Error => Error_None);
-      end if;
-      declare
-         EV : constant Event_Value := Event.Fields (Slot).Value;
-      begin
-         case C.Expected.Kind is
-            when E_Int =>
-               if EV.Kind = V_Int and then EV.Int_Value = C.Expected.Int_Value then
-                  return (Matched => True, Error => Error_None);
-               end if;
-               return (Matched => False, Error => Error_None);
-            when E_Int_List =>
-               if EV.Kind /= V_Int then
-                  return (Matched => False, Error => Error_None);
-               end if;
-               for I in 1 .. C.Expected.Int_Count loop
-                  pragma Loop_Invariant
-                    (C.Expected.Int_Count <= Max_Values_Per_Sel);
-                  if EV.Int_Value = C.Expected.Ints (I) then
-                     return (Matched => True, Error => Error_None);
-                  end if;
-               end loop;
-               return (Matched => False, Error => Error_None);
-            when E_Text =>
-               if EV.Kind /= V_Text then
-                  return (Matched => False, Error => Error_None);
-               end if;
-               if Text_Matches
-                 (EV.Text_Value.Data (1 .. EV.Text_Value.Length),
-                  C.Expected.Single.Data (1 .. C.Expected.Single.Length),
-                  C.Modifiers)
-               then
-                  return (Matched => True, Error => Error_None);
-               end if;
-               return (Matched => False, Error => Error_None);
-            when E_Text_List =>
-               if EV.Kind /= V_Text then
-                  return (Matched => False, Error => Error_None);
-               end if;
-               for I in 1 .. C.Expected.Count loop
-                  pragma Loop_Invariant
-                    (C.Expected.Count <= Max_Values_Per_Sel);
-                  if Text_Matches
-                    (EV.Text_Value.Data (1 .. EV.Text_Value.Length),
-                     C.Expected.Items (I).Data
-                       (1 .. C.Expected.Items (I).Length),
-                     C.Modifiers)
-                  then
-                     return (Matched => True, Error => Error_None);
-                  end if;
-               end loop;
-               return (Matched => False, Error => Error_None);
-            when E_Pattern =>
-               return (Matched => False, Error => Error_Unsupported_Modifier);
-         end case;
-      end;
-   end Match_Field;
+      S.Field_Count := S.Field_Count + 1;
+      S.Fields (S.Field_Count) := F;
+   end Append_Field;
 
-   function Match_Selection
-     (Sel : Selection; Event : Event_Record) return Eval_Result
-   is
-   begin
-      for I in 1 .. Sel.Field_Count loop
-         pragma Loop_Invariant (Sel.Field_Count <= Max_Fields_Per_Sel);
-         declare
-            R : constant Eval_Result := Match_Field (Sel.Fields (I), Event);
-         begin
-            if R.Error /= Error_None then
-               return R;
-            end if;
-            if not R.Matched then
-               return (Matched => False, Error => Error_None);
-            end if;
-         end;
-      end loop;
-      --  A selection with zero fields cannot match; the boundary
-      --  rejects such rules at load, this is defence in depth.
-      if Sel.Field_Count = 0 then
-         return (Matched => False, Error => Error_None);
-      end if;
-      return (Matched => True, Error => Error_None);
-   end Match_Selection;
-
-   function Eval_Node
-     (Rule : Compiled_Rule; Event : Event_Record; Idx : Positive;
-      Fuel : Natural)
-      return Eval_Result
-   with Subprogram_Variant => (Decreases => Fuel)
-   is
-   begin
-      if Fuel = 0 then
-         --  Cyclic node graph: fail closed instead of recursing forever.
-         return (Matched => False, Error => Error_Invalid_Rule);
-      end if;
-      if Idx > Rule.Node_Count then
-         return (Matched => False, Error => Error_Invalid_Rule);
-      end if;
-      declare
-         N : constant Condition_Node := Rule.Nodes (Idx);
-      begin
-         case N.Kind is
-            when N_Ref =>
-               if N.Sel_Index > Rule.Sel_Count then
-                  return (Matched => False, Error => Error_Invalid_Rule);
-               end if;
-               return Match_Selection (Rule.Selections (N.Sel_Index), Event);
-            when N_Not =>
-               declare
-                  C : constant Eval_Result := Eval_Node (Rule, Event, N.Child, Fuel - 1);
-               begin
-                  if C.Error /= Error_None then
-                     return C;
-                  end if;
-                  return (Matched => not C.Matched, Error => Error_None);
-               end;
-            when N_And =>
-               declare
-                  L : constant Eval_Result := Eval_Node (Rule, Event, N.Left, Fuel - 1);
-                  R : constant Eval_Result := Eval_Node (Rule, Event, N.Right, Fuel - 1);
-               begin
-                  if L.Error /= Error_None then
-                     return L;
-                  end if;
-                  if R.Error /= Error_None then
-                     return R;
-                  end if;
-                  return (Matched => L.Matched and R.Matched,
-                          Error   => Error_None);
-               end;
-            when N_Or =>
-               declare
-                  L : constant Eval_Result := Eval_Node (Rule, Event, N.Left, Fuel - 1);
-                  R : constant Eval_Result := Eval_Node (Rule, Event, N.Right, Fuel - 1);
-               begin
-                  if L.Error /= Error_None then
-                     return L;
-                  end if;
-                  if R.Error /= Error_None then
-                     return R;
-                  end if;
-                  return (Matched => L.Matched or R.Matched,
-                          Error   => Error_None);
-               end;
-            when N_One_Of =>
-               declare
-                  First_Error : Eval_Error := Error_None;
-                  Saw_Error   : Boolean := False;
-               begin
-                  for I in 1 .. Rule.Sel_Count loop
-                     pragma Loop_Invariant (Rule.Sel_Count <= Max_Selections);
-                     if Has_Prefix (Rule.Selections (I).Name, N.Prefix) then
-                        declare
-                           R : constant Eval_Result :=
-                             Match_Selection (Rule.Selections (I), Event);
-                        begin
-                           if R.Error /= Error_None and then not Saw_Error then
-                              First_Error := R.Error;
-                              Saw_Error := True;
-                           end if;
-                           if R.Error = Error_None and then R.Matched then
-                              return (Matched => True, Error => Error_None);
-                           end if;
-                        end;
-                     end if;
-                  end loop;
-                  if Saw_Error then
-                     --  Fail-closed: a matching-shaped branch errored and
-                     --  nothing cleanly matched.
-                     return (Matched => False, Error => First_Error);
-                  end if;
-                  return (Matched => False, Error => Error_None);
-               end;
-            when N_All_Of =>
-               declare
-                  First_Error : Eval_Error := Error_None;
-                  Saw_Error   : Boolean := False;
-               begin
-                  for I in 1 .. Rule.Sel_Count loop
-                     pragma Loop_Invariant (Rule.Sel_Count <= Max_Selections);
-                     if Has_Prefix (Rule.Selections (I).Name, N.Prefix) then
-                        declare
-                           R : constant Eval_Result :=
-                             Match_Selection (Rule.Selections (I), Event);
-                        begin
-                           if R.Error /= Error_None then
-                              if not Saw_Error then
-                                 First_Error := R.Error;
-                                 Saw_Error := True;
-                              end if;
-                           elsif not R.Matched then
-                              return (Matched => False, Error => Error_None);
-                           end if;
-                        end;
-                     end if;
-                  end loop;
-                  if Saw_Error then
-                     return (Matched => False, Error => First_Error);
-                  end if;
-                  --  Vacuous truth over an empty prefix set, per Sigma.
-                  return (Matched => True, Error => Error_None);
-               end;
-            when N_Near | N_Count =>
-               return (Matched => False,
-                       Error   => Error_Unsupported_Condition);
-         end case;
-      end;
-   end Eval_Node;
-
-   function Empty_Rule return Compiled_Rule is
-      R : Compiled_Rule;
-   begin
-      R.Sel_Count := 0;
-      R.Node_Count := 0;
-      R.Root := 0;
-      return R;
-   end Empty_Rule;
-
-   function Evaluate
-     (Rule : Compiled_Rule; Event : Event_Record) return Eval_Result
-   is
-   begin
-      if Rule.Root = 0 or else Rule.Root > Rule.Node_Count then
-         return (Matched => False, Error => Error_Invalid_Rule);
-      end if;
-      return Eval_Node (Rule, Event, Rule.Root, Max_Condition_Nodes);
-   end Evaluate;
-
-end Sigma_Verdict.Engine;
