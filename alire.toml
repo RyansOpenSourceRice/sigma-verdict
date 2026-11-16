@@ -1,0 +1,27 @@
+name = "sigma_verdict"
+description = "Deterministic Sigma evaluator in SPARK Ada (IN DEVELOPMENT)"
+version = "0.1.0-dev"
+tags = ["sigma", "detection", "spark", "security"]
+licenses = "Apache-2.0"
+website = "https://github.com/RyansOpenSourceRice/sigma-verdict"
+
+authors = ["Ryan"]
+maintainers = ["Ryan <RyansOpenSourceRice@users.noreply.github.com>"]
+maintainers-logins = ["RyansOpenSourceRice"]
+
+#  NOTE: pinned to the 0.2.0 API on purpose. adayaml 0.3.0 exists in the
+#  community index but does not resolve in this environment
+#  (solver: "missing:unavailable", new simple_components dependency).
+#  Re-evaluate 0.3.0 when it becomes resolvable; see ROADMAP.md.
+[[depends-on]]
+adayaml = "~0.2.0"
+
+[[depends-on]]
+gnatprove = "^16.1.0"
+
+[[depends-on]]
+aunit = "^26.0.0"
+
+[[actions]]
+type = "test"
+command = ["sh", "scripts/alr-test.sh"]
