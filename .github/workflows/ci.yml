@@ -55,11 +55,22 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/alr" --version
 
+      - name: Add Alire indexes
+        run: |
+          alr -n index --add --name flyology --url git+https://github.com/flyology-ada/alire-index.git
+
+      - name: Select latest toolchain (non-interactive)
+        #  Bare names resolve to the newest available releases, so CI
+        #  always builds with the latest GNAT/GPRbuild. -n auto-confirms
+        #  the download instead of prompting (a prompt on a headless
+        #  runner aborts the job).
+        run: alr -n toolchain --select gnat_native gprbuild
+
       - name: Full local gate (build + tests + flow proof)
         run: sh scripts/verify.sh
 
       - name: Build examples
-        run: alr exec -- gprbuild -P examples/examples.gpr
+        run: alr -n exec -- gprbuild -P examples/examples.gpr
 
       - name: Upload test binaries
         if: always()
@@ -74,6 +85,9 @@ jobs:
     #  is the blocking gate in build-test-prove.
     runs-on: ubuntu-24.04
     continue-on-error: true
+    #  Silver level 2 exceeds 10 minutes locally; cap the tracking run
+    #  so it can never burn the full 6-hour job budget.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -89,5 +103,12 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/alr" --version
 
+      - name: Add Alire indexes
+        run: |
+          alr -n index --add --name flyology --url git+https://github.com/flyology-ada/alire-index.git
+
+      - name: Select latest toolchain (non-interactive)
+        run: alr -n toolchain --select gnat_native gprbuild
+
       - name: GNATprove Silver level 2 (proof-only project)
-        run: alr exec -- gnatprove -P proof/spark_core.gpr --mode=silver --level=2 --checks-as-errors=on
+        run: alr -n exec -- gnatprove -P proof/spark_core.gpr --mode=silver --level=2 --checks-as-errors=on
