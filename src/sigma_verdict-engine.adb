@@ -370,32 +370,33 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
       Dashes : Dash_Pos_Array; Dash_N : Dash_Count;
       Result : out Consume_Result)
    is
-      HC : Natural := Start;
-      NP : Natural := N'First;
+      HC     : Natural := Start;
+      NP_Off : Natural := 0;
    begin
-      if N'Length = 0 then
-         Result := (Matched => True, Stop => Start);
-         return;
-      end if;
-      while NP <= N'Last loop
+      while NP_Off < N'Length loop
          pragma Loop_Invariant (HC <= H'Length);
-         pragma Loop_Invariant (NP in N'First .. N'Last);
-         pragma Loop_Variant (Increases => NP);
-         if Is_Dash_At (Dashes, Dash_N, NP - N'First + 1) then
+         pragma Loop_Invariant (NP_Off <= N'Length);
+         pragma Loop_Variant (Increases => NP_Off);
+         --  NP_Off is a 0-based offset so every bound is static: the
+         --  live index N'First + NP_Off stays inside N'First ..
+         --  N'Last exactly like the proven linear matchers.
+         --  NP_Off advances only below N'Length - 1, HC by 1 only
+         --  below H'Length, and HC by 3 only below H'Length - 3
+         --  (H'Length >= 3 checked first, so no underflow).
+         if Is_Dash_At (Dashes, Dash_N, NP_Off + 1) then
             if HC < H'Length
               and then (H (H'First + HC) = '-'
                         or else H (H'First + HC) = '/')
             then
                HC := HC + 1;
-               NP := NP + 1;
-            elsif HC + 3 <= H'Length
+            elsif H'Length >= 3
+              and then HC <= H'Length - 3
               and then H (H'First + HC) = Character'Val (16#E2#)
               and then H (H'First + HC + 1) = Character'Val (16#80#)
               and then H (H'First + HC + 2) in Character'Val (16#93#)
                 | Character'Val (16#94#) | Character'Val (16#95#)
             then
                HC := HC + 3;
-               NP := NP + 1;
             else
                Result := (Matched => False, Stop => HC);
                return;
@@ -403,15 +404,16 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
          else
             if HC < H'Length
               and then Fold (H (H'First + HC), Sensitive)
-                       = Fold (N (NP), Sensitive)
+                       = Fold (N (N'First + NP_Off), Sensitive)
             then
                HC := HC + 1;
-               NP := NP + 1;
             else
                Result := (Matched => False, Stop => HC);
                return;
             end if;
          end if;
+         exit when NP_Off = N'Length - 1;
+         NP_Off := NP_Off + 1;
       end loop;
       Result := (Matched => True, Stop => HC);
    end Windash_Consume;
@@ -637,6 +639,7 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
    function Value_Matches
      (Haystack : String; Raw : String; C : Field_Constraint;
       Idx : Positive) return Boolean
+   with Pre => Idx in 1 .. Max_Values_Per_Sel
    is
    begin
       if C.Views.Has_Offset then
