@@ -1,0 +1,9 @@
+title: Out-of-subset regex rejection test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4728
+    CommandLine|re: '\d+'
+  condition: selection

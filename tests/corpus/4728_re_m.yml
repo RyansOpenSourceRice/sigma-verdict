@@ -1,0 +1,9 @@
+title: Multiline regex match test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4728
+    CommandLine|re|m: '^evil$'
+  condition: selection

@@ -42,8 +42,16 @@ package Sigma_Verdict.Limits with SPARK_Mode is
    --  Modifier chain length per field, e.g. |windash|contains is 2.
    Default_Modifiers_Per_Field : constant := 4;
 
-   --  Raw pattern text kept for Phase 2 matchers (re/wildcard).
-   Default_Pattern_Length : constant := 256;
+    --  Raw pattern text kept for Phase 2 matchers (re/wildcard).
+    Default_Pattern_Length : constant := 256;
+
+    --  Compiled NFA bytecode per pattern (P3a). One atom compiles to
+    --  at most a split (5 bytes) plus its body; {n,m} expansion is
+    --  cut off by the compiler budget, so 8x text length covers
+    --  every compilable pattern. Sized for the list case: sixteen
+    --  full programs must still fit a default 8 MB stack beside the
+    --  rule, which a state-record table (16+ bytes per state) cannot.
+    Default_Pattern_Code : constant := 8 * Default_Pattern_Length;
 
    --  Derived value views (P1b): the widest derivation is UTF-16 with
    --  BOM over a full-length value (2 bytes per byte plus 2 BOM bytes).

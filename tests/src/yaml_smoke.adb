@@ -238,5 +238,132 @@ begin
    Load_File ("tests/corpus/4728_gtcidr.yml", Load_Unsupported_Chain);
    Ada.Text_IO.Put_Line ("rejected: mixed operator chain");
 
+   --  ---- P3a: wildcards + re, end to end ----
+
+   --  Implicit glob, fully anchored: matches inside, not outside.
+   Load_File ("tests/corpus/4728_wild.yml");
+   Set_Event (4728, "whoami as admin");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "wild e2e match");
+   Set_Event (4728, "run whoami as admin");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "wild e2e anchored");
+   Set_Event (4728, "whoami as adm");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched, "wild e2e short");
+
+   --  Wildcards compose with contains, over a list.
+   Load_File ("tests/corpus/4728_wild_contains.yml");
+   Set_Event (4728, "run evil tool");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched,
+          "wild contains e2e evil");
+   Set_Event (4728, "run bad1.exe now");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched,
+          "wild contains e2e quest");
+   Set_Event (4728, "run good");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "wild contains e2e miss");
+
+   --  Escaped wildcards are literal (backslash consumed).
+   Load_File ("tests/corpus/4728_wild_escape.yml");
+   Set_Event (4728, "a*b\c");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "wild escape e2e");
+   Set_Event (4728, "axbxc");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "wild escape e2e miss");
+
+   --  Cased glob: case matters, anchoring still full.
+   Load_File ("tests/corpus/4728_wild_cased.yml");
+   Set_Event (4728, "Whoami");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "wild cased e2e");
+   Set_Event (4728, "whoami");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "wild cased e2e miss");
+
+   --  Regex: character class plus counted repetition, anchored.
+   --  Case-sensitive by default (spec).
+   Load_File ("tests/corpus/4728_re.yml");
+   Set_Event (4728, "abc42");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "re e2e match");
+   Set_Event (4728, "ABC42");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "re e2e case sensitive");
+   Set_Event (4728, "ab4");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched, "re e2e short");
+
+   --  re|i folds case.
+   Load_File ("tests/corpus/4728_re_i.yml");
+   Set_Event (4728, "ABC42");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "re i e2e");
+
+   --  re|m anchors per line.
+   Load_File ("tests/corpus/4728_re_m.yml");
+   Set_Event (4728, "ok" & ASCII.LF & "evil" & ASCII.LF & "xx");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "re m e2e");
+   Set_Event (4728, "ok evil xx");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched, "re m e2e miss");
+
+   --  re|s lets dot cross newlines.
+   Load_File ("tests/corpus/4728_re_s.yml");
+   Set_Event (4728, "a" & ASCII.LF & "b");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "re s e2e");
+
+   --  Regex over a list: OR by default, AND with all.
+   Load_File ("tests/corpus/4728_re_list.yml");
+   Set_Event (4728, "evilxx");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "re list e2e first");
+   Set_Event (4728, "xxgood");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "re list e2e second");
+   Set_Event (4728, "xxevil");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "re list e2e anchored");
+   Load_File ("tests/corpus/4728_re_all.yml");
+   Set_Event (4728, "ab");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "re all e2e");
+   Set_Event (4728, "a");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched, "re all e2e no");
+
+   --  A pattern/view mix loads, then fails closed at match time.
+   Load_File ("tests/corpus/4728_pattern_view.yml");
+   Set_Event (4728, "a*b");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_Unsupported_Modifier and then not R.Matched,
+          "pattern view unsupported");
+
+   --  Loader rejections for malformed or out-of-subset patterns.
+   Load_File ("tests/corpus/4728_re_paren.yml", Load_Bad_Value);
+   Ada.Text_IO.Put_Line ("rejected: unbalanced paren");
+   Load_File ("tests/corpus/4728_re_lazy.yml", Load_Bad_Value);
+   Ada.Text_IO.Put_Line ("rejected: lazy quantifier");
+   Load_File ("tests/corpus/4728_re_shorthand.yml",
+              Load_Unsupported_Pattern);
+   Ada.Text_IO.Put_Line ("rejected: out-of-subset escape");
+   Load_File ("tests/corpus/4728_re_int.yml", Load_Bad_Value);
+   Ada.Text_IO.Put_Line ("rejected: regex over integer");
+   Load_File ("tests/corpus/4728_re_ints.yml", Load_Bad_Value);
+   Ada.Text_IO.Put_Line ("rejected: regex integer list");
+   Load_File ("tests/corpus/4728_re_mixed.yml", Load_Bad_Integer);
+   Ada.Text_IO.Put_Line ("rejected: regex mixed list");
+
    Ada.Text_IO.Put_Line ("yaml_smoke: matched as expected");
 end Yaml_Smoke;

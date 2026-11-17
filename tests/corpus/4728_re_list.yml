@@ -1,0 +1,11 @@
+title: Regex list match test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4728
+    CommandLine|re:
+      - '^evil'
+      - 'good$'
+  condition: selection

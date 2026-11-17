@@ -1,0 +1,11 @@
+title: Wildcards inside contains test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4728
+    CommandLine|contains:
+      - '*evil*'
+      - 'bad?.exe'
+  condition: selection

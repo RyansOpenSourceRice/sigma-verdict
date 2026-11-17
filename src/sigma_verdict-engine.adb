@@ -216,54 +216,146 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
       return Mod_None;
    end Comparison_Of;
 
-   function Chain_Supported (Set : Modifier_Set) return Boolean is
-      Seen_Matcher : Boolean := False;
-      Seen_View    : Boolean := False;
-      Seen_Cmp     : Boolean := False;
-      Seen_CIDR    : Boolean := False;
-   begin
-      for I in 1 .. Set.Count loop
-         pragma Loop_Invariant (Set.Count <= Max_Modifiers_Per_Field);
-         if Is_Supported_Modifier (Set.Items (I)) then
-            --  At most one operator per chain; several would
-            --  silently shadow each other, so the chain fails closed.
-            if Seen_Matcher or Seen_Cmp or Seen_CIDR then
-               return False;
-            end if;
-            Seen_Matcher := True;
-         elsif Set.Items (I) in Mod_GT | Mod_GTE | Mod_LT | Mod_LTE then
-            if Seen_Matcher or Seen_Cmp or Seen_CIDR then
-               return False;
-            end if;
-            Seen_Cmp := True;
-         elsif Set.Items (I) = Mod_CIDR then
-            if Seen_Matcher or Seen_Cmp or Seen_CIDR then
-               return False;
-            end if;
-            Seen_CIDR := True;
-         elsif Set.Items (I) in Mod_Windash | Mod_Wide | Mod_UTF16LE
-           | Mod_UTF16BE | Mod_UTF16 | Mod_Base64 | Mod_Base64Offset
-         then
-            --  At most one view derivation per chain; mixing views
-            --  would stack encodings the core does not model. Views
-            --  never ride with comparisons or CIDR.
-            if Seen_View or Seen_Cmp or Seen_CIDR then
-               return False;
-            end if;
-            Seen_View := True;
-         elsif Set.Items (I) not in Mod_Cased | Mod_All | Mod_Exists then
-            return False;
-         elsif (Seen_Cmp or Seen_CIDR)
-           and then Set.Items (I) /= Mod_All
-         then
-            --  Comparisons and CIDR admit only `all` (mirroring
-            --  pySigma typing: cased is string-only, exists stands
-            --  alone). Text matchers keep cased/all/exists.
-            return False;
-         end if;
-      end loop;
-      return True;
-   end Chain_Supported;
+    function Has_Re_Modifier
+      (Set : Modifier_Set) return Boolean
+    is
+    begin
+       for I in 1 .. Set.Count loop
+          pragma Loop_Invariant (Set.Count <= Max_Modifiers_Per_Field);
+          if Set.Items (I) in Mod_Re | Mod_Re_I | Mod_Re_M | Mod_Re_S then
+             return True;
+          end if;
+       end loop;
+       return False;
+    end Has_Re_Modifier;
+
+    function Has_Pattern_Modifier
+      (Set : Modifier_Set) return Boolean
+    is
+    begin
+       for I in 1 .. Set.Count loop
+          pragma Loop_Invariant (Set.Count <= Max_Modifiers_Per_Field);
+          if Set.Items (I) in Mod_Re | Mod_Re_I | Mod_Re_M | Mod_Re_S
+            | Mod_Wildcard
+          then
+             return True;
+          end if;
+       end loop;
+       return False;
+    end Has_Pattern_Modifier;
+
+    function Chain_Supported (Set : Modifier_Set) return Boolean is
+       Seen_Matcher : Boolean := False;
+       Seen_View    : Boolean := False;
+       Seen_Cmp     : Boolean := False;
+       Seen_CIDR    : Boolean := False;
+       Seen_Re      : Boolean := False;
+       Seen_Re_I    : Boolean := False;
+       Seen_Re_M    : Boolean := False;
+       Seen_Re_S    : Boolean := False;
+       Seen_Wild    : Boolean := False;
+       Seen_Cased   : Boolean := False;
+    begin
+       for I in 1 .. Set.Count loop
+          pragma Loop_Invariant (Set.Count <= Max_Modifiers_Per_Field);
+          if Is_Supported_Modifier (Set.Items (I)) then
+             --  At most one anchor matcher per chain; several would
+             --  silently shadow each other, so the chain fails closed.
+             --  One anchor composes with one pattern source (P3a).
+             if Seen_Matcher or Seen_Cmp or Seen_CIDR then
+                return False;
+             end if;
+             Seen_Matcher := True;
+          elsif Set.Items (I) in Mod_GT | Mod_GTE | Mod_LT | Mod_LTE then
+             if Seen_Matcher or Seen_Cmp or Seen_CIDR
+               or Seen_Re or Seen_Re_I or Seen_Re_M or Seen_Re_S
+               or Seen_Wild
+             then
+                return False;
+             end if;
+             Seen_Cmp := True;
+          elsif Set.Items (I) = Mod_CIDR then
+             if Seen_Matcher or Seen_Cmp or Seen_CIDR
+               or Seen_Re or Seen_Re_I or Seen_Re_M or Seen_Re_S
+               or Seen_Wild
+             then
+                return False;
+             end if;
+             Seen_CIDR := True;
+          elsif Set.Items (I) = Mod_Re then
+             if Seen_Re or Seen_Wild or Seen_View
+               or Seen_Cmp or Seen_CIDR
+             then
+                return False;
+             end if;
+             Seen_Re := True;
+          elsif Set.Items (I) = Mod_Re_I then
+             if Seen_Re_I or Seen_Wild or Seen_View
+               or Seen_Cmp or Seen_CIDR
+             then
+                return False;
+             end if;
+             Seen_Re_I := True;
+          elsif Set.Items (I) = Mod_Re_M then
+             if Seen_Re_M or Seen_Wild or Seen_View
+               or Seen_Cmp or Seen_CIDR
+             then
+                return False;
+             end if;
+             Seen_Re_M := True;
+          elsif Set.Items (I) = Mod_Re_S then
+             if Seen_Re_S or Seen_Wild or Seen_View
+               or Seen_Cmp or Seen_CIDR
+             then
+                return False;
+             end if;
+             Seen_Re_S := True;
+          elsif Set.Items (I) = Mod_Wildcard then
+             if Seen_Wild or Seen_Re or Seen_Re_I or Seen_Re_M
+               or Seen_Re_S or Seen_View or Seen_Cmp or Seen_CIDR
+             then
+                return False;
+             end if;
+             Seen_Wild := True;
+          elsif Set.Items (I) in Mod_Windash | Mod_Wide | Mod_UTF16LE
+            | Mod_UTF16BE | Mod_UTF16 | Mod_Base64 | Mod_Base64Offset
+          then
+             --  At most one view derivation per chain; mixing views
+             --  would stack encodings the core does not model. Views
+             --  never ride with comparisons, CIDR, or patterns.
+             if Seen_View or Seen_Cmp or Seen_CIDR
+               or Seen_Re or Seen_Re_I or Seen_Re_M or Seen_Re_S
+               or Seen_Wild
+             then
+                return False;
+             end if;
+             Seen_View := True;
+          elsif Set.Items (I) = Mod_Cased then
+             Seen_Cased := True;
+             if Seen_Cmp or Seen_CIDR then
+                --  Comparisons and CIDR admit only `all`: cased is
+                --  string-only. (Checked here because cased now has
+                --  its own branch; order after cmp/cidr still refuses
+                --  exactly as before.)
+                return False;
+             end if;
+          elsif Set.Items (I) not in Mod_All | Mod_Exists then
+             return False;
+          elsif (Seen_Cmp or Seen_CIDR)
+            and then Set.Items (I) /= Mod_All
+          then
+             --  Comparisons and CIDR admit only `all`: cased is
+             --  string-only, exists stands alone.
+             return False;
+          end if;
+       end loop;
+       if Seen_Cased and then Seen_Re_I then
+          --  `cased` (case-sensitive) contradicts `re|i`
+          --  (case-insensitive): refuse rather than guess which wins.
+          return False;
+       end if;
+       return True;
+    end Chain_Supported;
 
    ----------------
    --  Matching --
@@ -626,9 +718,13 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
             return C.Views.Count = 0
               and then not C.Views.Has_Offset
               and then not Has_View_Modifier (C.Modifiers);
-         when E_Pattern =>
-            --  Rejected as Unsupported regardless of views.
-            return True;
+          when E_Pattern | E_Pattern_List =>
+             --  Patterns carry their program in Expected, never views:
+             --  the chain gate already refuses pattern/view mixes, so
+             --  anything else bypassed the loader and fails closed.
+             return C.Views.Count = 0
+               and then not C.Views.Has_Offset
+               and then not Has_View_Modifier (C.Modifiers);
          when E_Text =>
             if C.Views.Has_Offset then
                return C.Views.Count = 1
@@ -731,6 +827,287 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
      ((Net.Base.Length = 4 and then Net.Prefix <= 32)
       or else (Net.Base.Length = 16 and then Net.Prefix <= 128));
 
+   --  P3a Thompson NFA Pike VM. Executes loader-built bytecode
+   --  with a single left-to-right pass: every position closes the
+   --  epsilon fan (explicit stack, visited-capped so the static
+   --  inner bound always suffices) and then steps one character.
+   --  All loops are static `for` ranges, so termination needs no
+   --  fuel argument; the unreachable fallbacks (full stack,
+   --  unclosable remainder) answer PV_Invalid loudly instead of
+   --  mis-indexing. Invalid edges in hand-built programs are
+   --  skipped, which can only remove paths and never create a
+   --  match (fail-closed direction).
+   type Pattern_Verdict is (PV_Match, PV_No_Match, PV_Invalid);
+
+   function Case_Twin (C : Character) return Character is
+     (if C in 'a' .. 'z' then Character'Val (Character'Pos (C) - 32)
+      elsif C in 'A' .. 'Z' then Character'Val (Character'Pos (C) + 32)
+      else C);
+   --  ASCII case twin for folded class matching: 'b' matches [A-Z]
+   --  because its twin 'B' is in range, and vice versa. Non-letters
+   --  are their own twin, so exactness is preserved there.
+
+   function Run_Pattern
+     (Prog : NFA_Program; Text : String) return Pattern_Verdict
+   with Pre => Valid_Program (Prog)
+   is
+      Len   : constant Natural := Text'Length;
+      LL    : constant Long_Long_Integer :=
+        Long_Long_Integer (Prog.Length) + 1;
+      Inner : constant Natural :=
+        (if LL > Long_Long_Integer (Natural'Last)
+         then Natural'Last
+         else Natural (LL));
+      --  Epsilon-closure bound per text position: every push marks
+      --  a distinct visited code position, so pops never exceed
+      --  Length. Saturated only for absurd capacities; the loader
+      --  refuses programs that cannot fit anyway.
+
+      Visited : array (1 .. Max_Pattern_Code) of Boolean :=
+        [others => False];
+      In_Cur  : array (1 .. Max_Pattern_Code) of Boolean :=
+        [others => False];
+      In_Next : array (1 .. Max_Pattern_Code) of Boolean :=
+        [others => False];
+      Stack   : array (1 .. Max_Pattern_Code) of Natural :=
+        [others => 0];
+      Top        : Natural := 0;
+      Match_Flag : Boolean := False;
+
+      procedure Push (PC : Natural; Full : out Boolean)
+      with Global => (In_Out => (Top, Stack, Visited), Input => Prog),
+           Pre    => Top <= Stack'Last,
+           Post   => (if not Full then Top <= Stack'Last)
+       is
+      begin
+         Full := False;
+         if PC in 1 .. Prog.Length and then not Visited (PC) then
+            if Top >= Stack'Last then
+               --  Unreachable: pushes are visited-capped to Length.
+               Full := True;
+               return;
+            end if;
+            Visited (PC) := True;
+            Top := Top + 1;
+            Stack (Top) := PC;
+         end if;
+      end Push;
+
+      --  Big-endian 16-bit jump target at Loc/Loc+1 (fits Integer:
+      --  at most 65535).
+      function Fetched (Loc : Natural) return Natural is
+        (Character'Pos (Prog.Code (Loc)) * 256
+         + Character'Pos (Prog.Code (Loc + 1)))
+      with Pre => Loc >= 1
+        and then Long_Long_Integer (Loc) + 1
+          <= Long_Long_Integer (Prog.Length);
+   begin
+      for P in 0 .. Len loop
+         for K in 1 .. Prog.Length loop
+            Visited (K) := False;
+            In_Cur (K) := False;
+         end loop;
+         Top := 0;
+         Match_Flag := False;
+          --  Seed with states carried from the previous character.
+          for S in 1 .. Prog.Length loop
+             pragma Loop_Invariant (Top <= Stack'Last);
+             if In_Next (S) then
+               In_Next (S) := False;
+               declare
+                  Full : Boolean;
+               begin
+                  Push (S, Full);
+                  if Full then
+                     return PV_Invalid;
+                  end if;
+               end;
+            end if;
+         end loop;
+         --  Seed the entry for the first position always, and for
+         --  every position when the pattern is not start-anchored.
+         if P = 0 or else not Prog.Anchor_Start then
+            declare
+               Full : Boolean;
+            begin
+               Push (1, Full);
+               if Full then
+                  return PV_Invalid;
+               end if;
+            end;
+         end if;
+          --  Epsilon closure.
+          for Step in 1 .. Inner loop
+             pragma Loop_Invariant (Top <= Stack'Last);
+             exit when Top = 0;
+            declare
+               PC   : constant Natural := Stack (Top);
+               PCLL : constant Long_Long_Integer :=
+                 Long_Long_Integer (PC);
+               --  Out-of-range slots decode as OC_Dead and match no
+               --  branch below: removing edges cannot create a match.
+               Op   : constant Character :=
+                 (if PC in 1 .. Prog.Length then Prog.Code (PC)
+                  else OC_Dead);
+            begin
+               Top := Top - 1;
+               if Op = OC_Match then
+                  Match_Flag := True;
+               elsif Op = OC_Split then
+                  if PCLL + 4 <= Long_Long_Integer (Prog.Length) then
+                     declare
+                        Full : Boolean;
+                     begin
+                        Push (Fetched (PC + 1), Full);
+                        if Full then
+                           return PV_Invalid;
+                        end if;
+                        Push (Fetched (PC + 3), Full);
+                        if Full then
+                           return PV_Invalid;
+                        end if;
+                     end;
+                  end if;
+               elsif Op = OC_Jmp then
+                  if PCLL + 2 <= Long_Long_Integer (Prog.Length) then
+                     declare
+                        Full : Boolean;
+                     begin
+                        Push (Fetched (PC + 1), Full);
+                        if Full then
+                           return PV_Invalid;
+                        end if;
+                     end;
+                  end if;
+               elsif Op = OC_Begin then
+                  if (P = 0
+                      or else (Prog.Multi_Line and then P >= 1
+                        and then Text (Text'First + (P - 1)) = ASCII.LF))
+                    and then PCLL + 1
+                      <= Long_Long_Integer (Prog.Length)
+                  then
+                     declare
+                        Full : Boolean;
+                     begin
+                        Push (PC + 1, Full);
+                        if Full then
+                           return PV_Invalid;
+                        end if;
+                     end;
+                  end if;
+               elsif Op = OC_End then
+                  if (P = Len
+                      or else ((not Prog.Multi_Line)
+                        and then Long_Long_Integer (P) + 1
+                          = Long_Long_Integer (Len)
+                        and then Len >= 1
+                        and then Text (Text'First + (Len - 1)) = ASCII.LF)
+                      or else (Prog.Multi_Line and then P < Len
+                        and then Text (Text'First + P) = ASCII.LF))
+                    and then PCLL + 1
+                      <= Long_Long_Integer (Prog.Length)
+                  then
+                     declare
+                        Full : Boolean;
+                     begin
+                        Push (PC + 1, Full);
+                        if Full then
+                           return PV_Invalid;
+                        end if;
+                     end;
+                  end if;
+               elsif Op = OC_Lit or else Op = OC_Any
+                 or else Op = OC_Any_NL or else Op = OC_Cls
+                 or else Op = OC_NCls
+               then
+                  --  Consuming state: active for the character step.
+                  --  Truncated operands (hand-built) skip it, which
+                  --  only removes paths.
+                  if Op = OC_Any or else Op = OC_Any_NL then
+                     In_Cur (PC) := True;
+                  elsif Op = OC_Lit then
+                     if PCLL + 1 <= Long_Long_Integer (Prog.Length) then
+                        In_Cur (PC) := True;
+                     end if;
+                  elsif PCLL + 3 <= Long_Long_Integer (Prog.Length) then
+                     In_Cur (PC) := True;
+                  end if;
+               end if;
+               --  Unknown opcodes (hand-built) are ignored: removing
+               --  edges cannot create a match.
+            end;
+         end loop;
+         if Top /= 0 then
+            --  Unreachable: pushes are visited-capped, so the static
+            --  bound always drains the stack.
+            return PV_Invalid;
+         end if;
+         if (not Prog.Anchor_End) and then Match_Flag then
+            return PV_Match;
+         end if;
+         exit when P = Len;
+         --  Character step on the next event character.
+         declare
+            C : constant Character := Text (Text'First + P);
+         begin
+            for S in 1 .. Prog.Length loop
+               if In_Cur (S) then
+                  declare
+                     Op  : constant Character := Prog.Code (S);
+                     SLL : constant Long_Long_Integer :=
+                       Long_Long_Integer (S);
+                     PLL : constant Long_Long_Integer :=
+                       Long_Long_Integer (Prog.Length);
+                  begin
+                     if Op = OC_Any then
+                        if C /= ASCII.LF and then SLL + 1 <= PLL then
+                           In_Next (Natural (SLL + 1)) := True;
+                        end if;
+                     elsif Op = OC_Any_NL then
+                        if SLL + 1 <= PLL then
+                           In_Next (Natural (SLL + 1)) := True;
+                        end if;
+                     elsif Op = OC_Lit then
+                        if SLL + 1 <= PLL
+                          and then Fold (C, not Prog.Fold)
+                            = Prog.Code (Natural (SLL + 1))
+                        then
+                           if SLL + 2 <= PLL then
+                              In_Next (Natural (SLL + 2)) := True;
+                           end if;
+                        end if;
+                     elsif Op = OC_Cls or else Op = OC_NCls then
+                        if SLL + 3 <= PLL then
+                           declare
+                              Lo : constant Character :=
+                                Prog.Code (Natural (SLL + 1));
+                              Hi : constant Character :=
+                                Prog.Code (Natural (SLL + 2));
+                              Twin : constant Character := Case_Twin (C);
+                              In_Range : constant Boolean :=
+                                (Lo <= C and then C <= Hi)
+                                or else (Prog.Fold
+                                  and then Lo <= Twin and then Twin <= Hi);
+                           begin
+                              if (Op = OC_Cls) = In_Range then
+                                 In_Next (Natural (SLL + 3)) := True;
+                              end if;
+                           end;
+                        end if;
+                     end if;
+                     --  Stale In_Cur entries for epsilon states cannot
+                     --  occur: only consuming states are ever flagged.
+                  end;
+               end if;
+            end loop;
+         end;
+      end loop;
+      if Prog.Anchor_End and then Match_Flag then
+         return PV_Match;
+      end if;
+      return PV_No_Match;
+   end Run_Pattern;
+
    function Match_Field
      (C : Field_Constraint; Event : Event_Record) return Eval_Result
    is
@@ -761,10 +1138,10 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
                              Error   => Error_Unsupported_Modifier);
                   end if;
                end;
-            when E_Int_List | E_Text_List | E_CIDR | E_CIDR_List
-              | E_Pattern =>
-               return (Matched => False,
-                       Error   => Error_Unsupported_Modifier);
+             when E_Int_List | E_Text_List | E_CIDR | E_CIDR_List
+               | E_Pattern | E_Pattern_List =>
+                return (Matched => False,
+                        Error   => Error_Unsupported_Modifier);
          end case;
       end if;
       if not Chain_Supported (C.Modifiers) then
@@ -775,10 +1152,7 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
          --  invariant); anything else bypassed the loader.
          return (Matched => False, Error => Error_Unsupported_Modifier);
       end if;
-      if C.Expected.Kind = E_Pattern then
-         return (Matched => False, Error => Error_Unsupported_Modifier);
-      end if;
-      if Slot = 0 then
+       if Slot = 0 then
          --  Absent field: no match, no error (standard Sigma semantics).
          return (Matched => False, Error => Error_None);
       end if;
@@ -872,8 +1246,79 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
                   end if;
                end loop;
                return (Matched => False, Error => Error_None);
-            when E_Pattern =>
-               return (Matched => False, Error => Error_Unsupported_Modifier);
+             when E_Pattern =>
+                if EV.Kind /= V_Text then
+                   return (Matched => False, Error => Error_None);
+                end if;
+                if not Valid_Program (C.Expected.Prog) then
+                   --  Hand-built rule bypassing the loader.
+                   return (Matched => False,
+                           Error   => Error_Invalid_Rule);
+                end if;
+                case Run_Pattern
+                  (C.Expected.Prog,
+                   EV.Text_Value.Data (1 .. EV.Text_Value.Length))
+                is
+                   when PV_Match =>
+                      return (Matched => True, Error => Error_None);
+                   when PV_No_Match =>
+                      return (Matched => False, Error => Error_None);
+                   when PV_Invalid =>
+                      return (Matched => False,
+                              Error   => Error_Invalid_Rule);
+                end case;
+             when E_Pattern_List =>
+                if EV.Kind /= V_Text then
+                   return (Matched => False, Error => Error_None);
+                end if;
+                if C.Expected.Pat_Count = 0 then
+                   --  An empty list matches nothing either way.
+                   return (Matched => False, Error => Error_None);
+                end if;
+                if Has_Modifier (C.Modifiers, Mod_All) then
+                   for I in 1 .. C.Expected.Pat_Count loop
+                      pragma Loop_Invariant
+                        (C.Expected.Pat_Count <= Max_Values_Per_Sel);
+                      if not Valid_Program (C.Expected.Pat_Progs (I)) then
+                         return (Matched => False,
+                                 Error   => Error_Invalid_Rule);
+                      end if;
+                      case Run_Pattern
+                        (C.Expected.Pat_Progs (I),
+                         EV.Text_Value.Data (1 .. EV.Text_Value.Length))
+                      is
+                         when PV_Match =>
+                            null;
+                         when PV_No_Match =>
+                            return (Matched => False, Error => Error_None);
+                         when PV_Invalid =>
+                            return (Matched => False,
+                                    Error   => Error_Invalid_Rule);
+                      end case;
+                   end loop;
+                   return (Matched => True, Error => Error_None);
+                end if;
+                for I in 1 .. C.Expected.Pat_Count loop
+                   pragma Loop_Invariant
+                     (C.Expected.Pat_Count <= Max_Values_Per_Sel);
+                   if not Valid_Program (C.Expected.Pat_Progs (I)) then
+                      return (Matched => False,
+                              Error   => Error_Invalid_Rule);
+                   end if;
+                   case Run_Pattern
+                     (C.Expected.Pat_Progs (I),
+                      EV.Text_Value.Data (1 .. EV.Text_Value.Length))
+                   is
+                      when PV_Match =>
+                         return (Matched => True, Error => Error_None);
+                      when PV_No_Match =>
+                         null;
+                      when PV_Invalid =>
+                         return (Matched => False,
+                                 Error   => Error_Invalid_Rule);
+                   end case;
+                end loop;
+                return (Matched => False, Error => Error_None);
             when E_CIDR =>
                if EV.Kind /= V_Text then
                   return (Matched => False, Error => Error_None);

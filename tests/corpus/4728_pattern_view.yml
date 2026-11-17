@@ -1,0 +1,9 @@
+title: Pattern with view chain test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4728
+    CommandLine|wide: 'a*b'
+  condition: selection

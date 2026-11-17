@@ -837,4 +837,394 @@ begin
    R := Evaluate (Rule, Event);
    Check (R.Error = Error_Unsupported_Modifier and then not R.Matched,
           "invalid stored net unsupported");
+
+   --  ---- P3a: pattern VM over hand-built programs ----
+
+   Rule.Sel_Count := 1;
+   Rule.Selections (1).Name := To_Field_Name ("selection").Value;
+   Rule.Selections (1).Field_Count := 1;
+   Rule.Node_Count := 1;
+   Rule.Nodes (1) := (Kind => N_Ref, Sel_Index => 1);
+   Rule.Root := 1;
+   Event.Count := 1;
+   Event.Fields (1).Name := To_Field_Name ("CommandLine").Value;
+
+   --  Literal "ab", fully anchored: LIT a, LIT b, MATCH.
+   Rule.Selections (1).Fields (1) :=
+     (Field     => To_Field_Name ("CommandLine").Value,
+      Modifiers => (Count => 0, Items => [others => Mod_None]),
+      Expected  => (Kind    => E_Pattern,
+                    Pattern => To_Pattern ("ab").Value,
+                    Prog    => (Code         =>
+                                  [1 => OC_Lit, 2 => 'a',
+                                   3 => OC_Lit, 4 => 'b',
+                                   5 => OC_Match,
+                                   others => Character'Val (0)],
+                                Length       => 5,
+                                Fold         => False,
+                                Multi_Line   => False,
+                                Anchor_Start => True,
+                                Anchor_End   => True)),
+      Views     => (others => <>));
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("ab").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "vm literal full");
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("abc").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "vm literal full rejects suffix");
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("xab").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "vm literal full rejects prefix");
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "vm literal full rejects empty");
+
+   --  Same program unanchored (contains mode) searches.
+   Rule.Selections (1).Fields (1).Expected.Prog.Anchor_Start := False;
+   Rule.Selections (1).Fields (1).Expected.Prog.Anchor_End := False;
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("xabx").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "vm literal search");
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("xa").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "vm literal search miss");
+
+   --  Glob a*c, fully anchored, case-insensitive (Sigma default):
+   --  LIT a; SPLIT -> ANY | LIT c; ANY loops via JMP; LIT c; MATCH.
+   Rule.Selections (1).Fields (1) :=
+     (Field     => To_Field_Name ("CommandLine").Value,
+      Modifiers => (Count => 0, Items => [others => Mod_None]),
+      Expected  => (Kind    => E_Pattern,
+                    Pattern => To_Pattern ("a*c").Value,
+                    Prog    => (Code         =>
+                                  [1 => OC_Lit, 2 => 'a',
+                                   3 => OC_Split, 4 => Character'Val (0),
+                                   5 => Character'Val (8),
+                                   6 => Character'Val (0),
+                                   7 => Character'Val (12),
+                                   8 => OC_Any_NL,
+                                   9 => OC_Jmp,
+                                   10 => Character'Val (0),
+                                   11 => Character'Val (3),
+                                   12 => OC_Lit, 13 => 'c',
+                                   14 => OC_Match,
+                                   others => Character'Val (0)],
+                                Length       => 14,
+                                Fold         => True,
+                                Multi_Line   => False,
+                                Anchor_Start => True,
+                                Anchor_End   => True)),
+      Views     => (others => <>));
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("ac").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "vm glob star empty");
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("axxc").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "vm glob star span");
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("AC").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "vm glob folded");
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("axxb").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched, "vm glob miss");
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("xac").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "vm glob anchored start");
+   --  Cased chain: same code, folding off, literals stored folded.
+   Rule.Selections (1).Fields (1).Modifiers :=
+     (Count => 1, Items => [1 => Mod_Cased, others => Mod_None]);
+   Rule.Selections (1).Fields (1).Expected.Prog.Fold := False;
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("AC").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched, "vm glob cased");
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("ac").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "vm glob cased hit");
+
+   --  Class [a-c]+ searched: CLS a c; SPLIT -> CLS | MATCH.
+   Rule.Selections (1).Fields (1) :=
+     (Field     => To_Field_Name ("CommandLine").Value,
+      Modifiers => (Count => 0, Items => [others => Mod_None]),
+      Expected  => (Kind    => E_Pattern,
+                    Pattern => To_Pattern ("[a-c]+").Value,
+                    Prog    => (Code         =>
+                                  [1 => OC_Cls, 2 => 'a', 3 => 'c',
+                                   4 => OC_Split, 5 => Character'Val (0),
+                                   6 => Character'Val (1),
+                                   7 => Character'Val (0),
+                                   8 => Character'Val (9),
+                                   9 => OC_Match,
+                                   others => Character'Val (0)],
+                                Length       => 9,
+                                Fold         => False,
+                                Multi_Line   => False,
+                                Anchor_Start => False,
+                                Anchor_End   => False)),
+      Views     => (others => <>));
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("xbbz").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "vm class plus");
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("xyz").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched, "vm class miss");
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("XBB").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "vm class case sensitive");
+   Rule.Selections (1).Fields (1).Expected.Prog.Fold := True;
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "vm class twin fold");
+
+   --  Alternation a|b, fully anchored.
+   Rule.Selections (1).Fields (1).Expected :=
+     (Kind    => E_Pattern,
+      Pattern => To_Pattern ("a|b").Value,
+      Prog    => (Code         =>
+                    [1 => OC_Split, 2 => Character'Val (0),
+                     3 => Character'Val (6), 4 => Character'Val (0),
+                     5 => Character'Val (11), 6 => OC_Lit, 7 => 'a',
+                     8 => OC_Jmp, 9 => Character'Val (0),
+                     10 => Character'Val (13), 11 => OC_Lit, 12 => 'b',
+                     13 => OC_Match, others => Character'Val (0)],
+                  Length       => 13,
+                  Fold         => False,
+                  Multi_Line   => False,
+                  Anchor_Start => True,
+                  Anchor_End   => True));
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("a").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "vm alt left");
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("b").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "vm alt right");
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("ab").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "vm alt full rejects pair");
+
+   --  Anchors ^a$ in search mode: BEGIN, LIT a, END, MATCH.
+   Rule.Selections (1).Fields (1).Expected :=
+     (Kind    => E_Pattern,
+      Pattern => To_Pattern ("^a$").Value,
+      Prog    => (Code         =>
+                    [1 => OC_Begin, 2 => OC_Lit, 3 => 'a',
+                     4 => OC_End, 5 => OC_Match,
+                     others => Character'Val (0)],
+                  Length       => 5,
+                  Fold         => False,
+                  Multi_Line   => False,
+                  Anchor_Start => False,
+                  Anchor_End   => False));
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("a").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "vm anchors");
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("ba").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "vm anchor begin rejects");
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("a" & ASCII.LF).Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched,
+          "vm anchor end before final LF");
+   Event.Fields (1).Value :=
+     (Kind => V_Text,
+      Text_Value => To_Event_Text ("a" & ASCII.LF & "b").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "vm anchor end rejects mid");
+
+   --  Multiline ^a over "x<LF>a": BEGIN, LIT a, MATCH.
+   Rule.Selections (1).Fields (1).Expected.Prog :=
+     (Code         => [1 => OC_Begin, 2 => OC_Lit, 3 => 'a',
+                       4 => OC_Match, others => Character'Val (0)],
+      Length       => 4,
+      Fold         => False,
+      Multi_Line   => True,
+      Anchor_Start => False,
+      Anchor_End   => False);
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("x" & ASCII.LF & "a").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "vm multiline begin");
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("xa").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "vm multiline begin rejects");
+
+   --  Empty program (hand-built, loader never emits this).
+   Rule.Selections (1).Fields (1).Expected :=
+     (Kind => E_Pattern, Pattern => To_Pattern ("").Value,
+      Prog => (others => <>));
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("ab").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_Invalid_Rule and then not R.Matched,
+          "vm empty program invalid");
+   --  Truncated literal (operand missing): edge skipped, clean miss.
+   Rule.Selections (1).Fields (1).Expected.Prog :=
+     (Code         => [1 => OC_Lit, others => Character'Val (0)],
+      Length       => 1,
+      Fold         => False,
+      Multi_Line   => False,
+      Anchor_Start => True,
+      Anchor_End   => True);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "vm truncated literal miss");
+   --  Split to nowhere: edge skipped, clean miss.
+   Rule.Selections (1).Fields (1).Expected.Prog :=
+     (Code         => [1 => OC_Split, 2 => Character'Val (0),
+                       3 => Character'Val (200),
+                       4 => Character'Val (0),
+                       5 => Character'Val (201),
+                       others => Character'Val (0)],
+      Length       => 5,
+      Fold         => False,
+      Multi_Line   => False,
+      Anchor_Start => False,
+      Anchor_End   => False);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "vm wild jump miss");
+   --  Empty regex (bare MATCH) searches everything, including empty.
+   Rule.Selections (1).Fields (1).Expected.Prog :=
+     (Code         => [1 => OC_Match, others => Character'Val (0)],
+      Length       => 1,
+      Fold         => False,
+      Multi_Line   => False,
+      Anchor_Start => False,
+      Anchor_End   => False);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "vm empty regex");
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "vm empty on empty");
+   --  Non-text event against a pattern: clean miss, never an error.
+   Event.Fields (1).Value := (Kind => V_Int, Int_Value => 7);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "vm int event miss");
+
+   --  Pattern lists: alternation program twice.
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("a").Value);
+   Rule.Selections (1).Fields (1) :=
+     (Field     => To_Field_Name ("CommandLine").Value,
+      Modifiers => (Count => 0, Items => [others => Mod_None]),
+      Expected  => (Kind      => E_Pattern_List,
+                    Pat_Items =>
+                      [1 => To_Pattern ("a|b").Value,
+                       2 => To_Pattern ("a|b").Value,
+                       others => (Length => 0,
+                                  Data   => [others => ' '])],
+                    Pat_Progs =>
+                      [1 => (Code         =>
+                               [1 => OC_Split, 2 => Character'Val (0),
+                                3 => Character'Val (6),
+                                4 => Character'Val (0),
+                                5 => Character'Val (11), 6 => OC_Lit,
+                                7 => 'a', 8 => OC_Jmp,
+                                9 => Character'Val (0),
+                                10 => Character'Val (13), 11 => OC_Lit,
+                                12 => 'b', 13 => OC_Match,
+                                others => Character'Val (0)],
+                             Length       => 13,
+                             Fold         => False,
+                             Multi_Line   => False,
+                             Anchor_Start => True,
+                             Anchor_End   => True),
+                       2 => (Code         =>
+                               [1 => OC_Lit, 2 => 'a',
+                                3 => OC_Match,
+                                others => Character'Val (0)],
+                             Length       => 3,
+                             Fold         => False,
+                             Multi_Line   => False,
+                             Anchor_Start => True,
+                             Anchor_End   => True),
+                       others => (others => <>)],
+                    Pat_Count => 2),
+      Views     => (others => <>));
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "vm list or");
+   Rule.Selections (1).Fields (1).Modifiers :=
+     (Count => 1, Items => [1 => Mod_All, others => Mod_None]);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "vm list all");
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("b").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "vm list all partial");
+   --  Empty pattern list matches nothing either way.
+   Rule.Selections (1).Fields (1).Expected :=
+     (Kind => E_Pattern_List, Pat_Items => [others => (Length => 0,
+                                                      Data => [others => ' '])],
+      Pat_Progs => [others => (others => <>)], Pat_Count => 0);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched, "vm list empty");
+
+   --  Chain gate: pattern sources compose and refuse as specified.
+   Rule.Selections (1).Fields (1) :=
+     (Field     => To_Field_Name ("CommandLine").Value,
+      Modifiers => (Count => 2, Items => [1 => Mod_Re, 2 => Mod_Contains,
+                                          others => Mod_None]),
+      Expected  => (Kind => E_Text, Single => To_Value_Text ("x").Value),
+      Views     => (others => <>));
+   Check (Chain_Supported (Rule.Selections (1).Fields (1).Modifiers),
+          "gate re plus contains");
+   Rule.Selections (1).Fields (1).Modifiers :=
+     (Count => 2, Items => [1 => Mod_Re, 2 => Mod_Re,
+                            others => Mod_None]);
+   Check (not Chain_Supported (Rule.Selections (1).Fields (1).Modifiers),
+          "gate re plus re refused");
+   Rule.Selections (1).Fields (1).Modifiers :=
+     (Count => 2, Items => [1 => Mod_Re, 2 => Mod_Re_I,
+                            others => Mod_None]);
+   Check (Chain_Supported (Rule.Selections (1).Fields (1).Modifiers),
+          "gate re plus i flag");
+   Rule.Selections (1).Fields (1).Modifiers :=
+     (Count => 2, Items => [1 => Mod_Cased, 2 => Mod_Re_I,
+                            others => Mod_None]);
+   Check (not Chain_Supported (Rule.Selections (1).Fields (1).Modifiers),
+          "gate cased plus i refused");
+   Rule.Selections (1).Fields (1).Modifiers :=
+     (Count => 2, Items => [1 => Mod_Re, 2 => Mod_Wide,
+                            others => Mod_None]);
+   Check (not Chain_Supported (Rule.Selections (1).Fields (1).Modifiers),
+          "gate pattern plus view refused");
+   Rule.Selections (1).Fields (1).Modifiers :=
+     (Count => 2, Items => [1 => Mod_Re, 2 => Mod_GT,
+                            others => Mod_None]);
+   Check (not Chain_Supported (Rule.Selections (1).Fields (1).Modifiers),
+          "gate pattern plus comparison refused");
 end Smoke;

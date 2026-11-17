@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 ### Added
+- Wildcards and regex (P3a), end to end: implicit unescaped `*`/`?`
+  route plain values to the pattern path (bare glob full-matches,
+  `contains`/`startswith`/`endswith` tighten anchoring); `re`
+  implements the spec PCRE subset (literals, `.` `^$` `*` `+` `?`
+  `{n,m}`, classes with ranges and negation, alternation, grouping,
+  `i`/`m`/`s` subflags) on a single-pass Pike VM over boundary-
+  compiled NFA bytecode. New public surface: `NFA_Program`
+  (bytecode + anchor/fold flags), `E_Pattern_List`, `Has_Re_Modifier`,
+  `Has_Pattern_Modifier`, `Max_Pattern_Code` capacity,
+  `Load_Unsupported_Pattern` (names the offending offset; the SPEC
+  growing-subset table tracks what is still refused). Malformed
+  patterns are `Load_Bad_Value`; `re`/globs over integers are
+  `Load_Bad_Value`; literal values now unescape Sigma backslashes
+  at load (`a\*b` denotes `a*b`).
 - Numeric comparisons (`gt`/`gte`/`lt`/`lte`) on the integer path,
   end to end: bare plain integers only, else `Load_Bad_Integer`;
   lists OR by default and AND with `all`. New public surface:

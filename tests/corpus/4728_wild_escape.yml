@@ -1,0 +1,9 @@
+title: Escaped wildcards stay literal test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4728
+    CommandLine: 'a\*b\\c'
+  condition: selection
