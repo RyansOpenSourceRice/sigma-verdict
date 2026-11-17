@@ -19,8 +19,12 @@
 --
 --  The core never raises: constructors report Ok = False and Evaluate
 --  reports Eval_Error. Integer field comparison uses Integer; larger
---  magnitudes are rejected at the boundary, not wrapped here.
+--  magnitudes are rejected at the boundary, not wrapped here. IP
+--  parsing and matching live in the standalone Sigma_Verdict.IP seam
+--  unit (see DESIGN.md "Library seams"); the core only stores
+--  IP_Network values and calls into it.
 
+with Sigma_Verdict.IP;
 with Sigma_Verdict.Limits;
 
 generic
@@ -120,10 +124,11 @@ package Sigma_Verdict.Engine with SPARK_Mode is
    -----------------
 
    --  Full Sigma modifier surface (sigmahq.io/docs/basics/modifiers,
-   --  pySigma 2.1.0 taxonomy). Phase 1 evaluates matchers
+   --  pySigma 2.1.0 taxonomy). Phases 1-2 evaluate matchers
    --  (bare/contains/startswith/endswith), the case flag (cased),
-   --  list conjunction (all), presence (exists) and value views
-   --  (windash, wide/utf16*, base64*); the rest (including
+   --  list conjunction (all), presence (exists), value views
+   --  (windash, wide/utf16*, base64*), numeric comparisons
+   --  (gt/gte/lt/lte) and CIDR prefix matching; the rest (including
    --  Mod_Unknown, which the boundary must reject at load) fails
    --  closed with Error_Unsupported_Modifier.
    type Modifier_Kind is
@@ -179,12 +184,17 @@ package Sigma_Verdict.Engine with SPARK_Mode is
    --  First view token in the chain, or Mod_None when there is none.
 
    function Chain_Supported (Set : Modifier_Set) return Boolean;
-   --  True iff the chain holds at most one matcher token
-   --  (bare/contains/startswith/endswith), at most one view token,
-   --  plus any combination of the structural flags (cased/all/
-   --  exists). Anything else — comparisons, patterns, unknown
-   --  tokens, several matchers, or mixed views — fails closed with
-   --  Error_Unsupported_Modifier.
+   --  True iff the chain holds at most one operator token — one text
+   --  matcher (bare/contains/startswith/endswith), one comparison
+   --  (gt/gte/lt/lte), or one cidr — plus at most one view token,
+   --  plus flags: matchers take any of cased/all/exists, while
+   --  comparisons and cidr take only all (mirroring pySigma typing:
+   --  cased is string-only, exists is standalone). Anything else —
+   --  patterns, unknown tokens, or mixed operators/views — fails
+   --  closed with Error_Unsupported_Modifier.
+
+   function Comparison_Of (Set : Modifier_Set) return Modifier_Kind;
+   --  First comparison token in the chain, or Mod_None.
 
    --------------------------------
    --  Derived value views (P1b) --
@@ -220,11 +230,15 @@ package Sigma_Verdict.Engine with SPARK_Mode is
    --  Selections --
    ----------------
 
-   type Expected_Kind is (E_Int, E_Text, E_Text_List, E_Int_List, E_Pattern);
+   type Expected_Kind is
+     (E_Int, E_Text, E_Text_List, E_Int_List, E_Pattern,
+      E_CIDR, E_CIDR_List);
 
    subtype Value_Count is Natural range 0 .. Max_Values_Per_Sel;
    type Value_Text_Array is array (1 .. Max_Values_Per_Sel) of Value_Text;
    type Int_Array is array (1 .. Max_Values_Per_Sel) of Integer;
+   type IP_Network_Array is
+     array (1 .. Max_Values_Per_Sel) of Sigma_Verdict.IP.IP_Network;
 
    --  All derived views of one field constraint, parallel to the
    --  text values: E_Text uses Items (1) when Count = 1 (or Offset
@@ -255,6 +269,11 @@ package Sigma_Verdict.Engine with SPARK_Mode is
             Int_Count : Value_Count := 0;
          when E_Pattern =>
             Pattern : Pattern_Text;
+         when E_CIDR =>
+            Net : Sigma_Verdict.IP.IP_Network;
+         when E_CIDR_List =>
+            Nets      : IP_Network_Array := [others => <>];
+            Net_Count : Value_Count := 0;
       end case;
    end record;
 

@@ -3,6 +3,8 @@
 
 package body Sigma_Verdict.Engine with SPARK_Mode is
 
+   package IP renames Sigma_Verdict.IP;
+
    ------------------
    --  Constructors --
    ------------------
@@ -203,29 +205,60 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
       return Mod_None;
    end View_Token;
 
+   function Comparison_Of (Set : Modifier_Set) return Modifier_Kind is
+   begin
+      for I in 1 .. Set.Count loop
+         pragma Loop_Invariant (Set.Count <= Max_Modifiers_Per_Field);
+         if Set.Items (I) in Mod_GT | Mod_GTE | Mod_LT | Mod_LTE then
+            return Set.Items (I);
+         end if;
+      end loop;
+      return Mod_None;
+   end Comparison_Of;
+
    function Chain_Supported (Set : Modifier_Set) return Boolean is
       Seen_Matcher : Boolean := False;
       Seen_View    : Boolean := False;
+      Seen_Cmp     : Boolean := False;
+      Seen_CIDR    : Boolean := False;
    begin
       for I in 1 .. Set.Count loop
          pragma Loop_Invariant (Set.Count <= Max_Modifiers_Per_Field);
          if Is_Supported_Modifier (Set.Items (I)) then
-            --  At most one matching semantic per chain; several would
+            --  At most one operator per chain; several would
             --  silently shadow each other, so the chain fails closed.
-            if Seen_Matcher then
+            if Seen_Matcher or Seen_Cmp or Seen_CIDR then
                return False;
             end if;
             Seen_Matcher := True;
+         elsif Set.Items (I) in Mod_GT | Mod_GTE | Mod_LT | Mod_LTE then
+            if Seen_Matcher or Seen_Cmp or Seen_CIDR then
+               return False;
+            end if;
+            Seen_Cmp := True;
+         elsif Set.Items (I) = Mod_CIDR then
+            if Seen_Matcher or Seen_Cmp or Seen_CIDR then
+               return False;
+            end if;
+            Seen_CIDR := True;
          elsif Set.Items (I) in Mod_Windash | Mod_Wide | Mod_UTF16LE
            | Mod_UTF16BE | Mod_UTF16 | Mod_Base64 | Mod_Base64Offset
          then
             --  At most one view derivation per chain; mixing views
-            --  would stack encodings the core does not model.
-            if Seen_View then
+            --  would stack encodings the core does not model. Views
+            --  never ride with comparisons or CIDR.
+            if Seen_View or Seen_Cmp or Seen_CIDR then
                return False;
             end if;
             Seen_View := True;
          elsif Set.Items (I) not in Mod_Cased | Mod_All | Mod_Exists then
+            return False;
+         elsif (Seen_Cmp or Seen_CIDR)
+           and then Set.Items (I) /= Mod_All
+         then
+            --  Comparisons and CIDR admit only `all` (mirroring
+            --  pySigma typing: cased is string-only, exists stands
+            --  alone). Text matchers keep cased/all/exists.
             return False;
          end if;
       end loop;
@@ -584,11 +617,12 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
 
    --  Boundary/loader invariant for one constraint: views parallel
    --  the text values exactly, base64offset rides alone on a single
-   --  value, and anything else bypassed the loader and fails closed.
+   --  value, integers and CIDR networks never carry views, and
+   --  anything else bypassed the loader and fails closed.
    function Views_Consistent (C : Field_Constraint) return Boolean is
    begin
       case C.Expected.Kind is
-         when E_Int | E_Int_List =>
+         when E_Int | E_Int_List | E_CIDR | E_CIDR_List =>
             return C.Views.Count = 0
               and then not C.Views.Has_Offset
               and then not Has_View_Modifier (C.Modifiers);
@@ -667,6 +701,36 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
       end;
    end Value_Matches;
 
+   --  Numeric comparison for one expected integer. Mod_None keeps
+   --  plain equality; anything except the four operators (which the
+   --  chain gate guarantees) also keeps equality. Type mismatch is
+   --  the caller's clean non-match, never an error.
+   function Compare_Ints
+     (Op : Modifier_Kind; Event_Int, Expected_Int : Integer) return Boolean
+   is
+   begin
+      case Op is
+         when Mod_GT =>
+            return Event_Int > Expected_Int;
+         when Mod_GTE =>
+            return Event_Int >= Expected_Int;
+         when Mod_LT =>
+            return Event_Int < Expected_Int;
+         when Mod_LTE =>
+            return Event_Int <= Expected_Int;
+         when others =>
+            return Event_Int = Expected_Int;
+      end case;
+   end Compare_Ints;
+
+   --  A stored network is valid when its length matches a version
+   --  and the prefix fits. The loader guarantees this; anything
+   --  else bypassed the loader and fails closed.
+   function Valid_CIDR_Net (Net : IP.IP_Network) return Boolean
+   is
+     ((Net.Base.Length = 4 and then Net.Prefix <= 32)
+      or else (Net.Base.Length = 16 and then Net.Prefix <= 128));
+
    function Match_Field
      (C : Field_Constraint; Event : Event_Record) return Eval_Result
    is
@@ -697,7 +761,8 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
                              Error   => Error_Unsupported_Modifier);
                   end if;
                end;
-            when E_Int_List | E_Text_List | E_Pattern =>
+            when E_Int_List | E_Text_List | E_CIDR | E_CIDR_List
+              | E_Pattern =>
                return (Matched => False,
                        Error   => Error_Unsupported_Modifier);
          end case;
@@ -719,10 +784,14 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
       end if;
       declare
          EV : constant Event_Value := Event.Fields (Slot).Value;
+         Op : constant Modifier_Kind := Comparison_Of (C.Modifiers);
       begin
          case C.Expected.Kind is
             when E_Int =>
-               if EV.Kind = V_Int and then EV.Int_Value = C.Expected.Int_Value then
+               if EV.Kind /= V_Int then
+                  return (Matched => False, Error => Error_None);
+               end if;
+               if Compare_Ints (Op, EV.Int_Value, C.Expected.Int_Value) then
                   return (Matched => True, Error => Error_None);
                end if;
                return (Matched => False, Error => Error_None);
@@ -738,7 +807,9 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
                   for I in 1 .. C.Expected.Int_Count loop
                      pragma Loop_Invariant
                        (C.Expected.Int_Count <= Max_Values_Per_Sel);
-                     if EV.Int_Value /= C.Expected.Ints (I) then
+                     if not Compare_Ints
+                       (Op, EV.Int_Value, C.Expected.Ints (I))
+                     then
                         return (Matched => False, Error => Error_None);
                      end if;
                   end loop;
@@ -747,7 +818,8 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
                for I in 1 .. C.Expected.Int_Count loop
                   pragma Loop_Invariant
                     (C.Expected.Int_Count <= Max_Values_Per_Sel);
-                  if EV.Int_Value = C.Expected.Ints (I) then
+                  if Compare_Ints (Op, EV.Int_Value, C.Expected.Ints (I))
+                  then
                      return (Matched => True, Error => Error_None);
                   end if;
                end loop;
@@ -802,6 +874,71 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
                return (Matched => False, Error => Error_None);
             when E_Pattern =>
                return (Matched => False, Error => Error_Unsupported_Modifier);
+            when E_CIDR =>
+               if EV.Kind /= V_Text then
+                  return (Matched => False, Error => Error_None);
+               end if;
+               if not Valid_CIDR_Net (C.Expected.Net) then
+                  --  Hand-built rule bypassing the loader.
+                  return (Matched => False,
+                          Error => Error_Unsupported_Modifier);
+               end if;
+               declare
+                  A : constant IP.IP_Address := IP.Parse_Address
+                    (EV.Text_Value.Data (1 .. EV.Text_Value.Length));
+               begin
+                  if A.Length = 0 then
+                     --  Malformed event data is a clean non-match:
+                     --  events are untrusted input, not rules.
+                     return (Matched => False, Error => Error_None);
+                  end if;
+                  if IP.Contains (C.Expected.Net, A) then
+                     return (Matched => True, Error => Error_None);
+                  end if;
+               end;
+               return (Matched => False, Error => Error_None);
+            when E_CIDR_List =>
+               if EV.Kind /= V_Text then
+                  return (Matched => False, Error => Error_None);
+               end if;
+               if C.Expected.Net_Count = 0 then
+                  --  An empty list matches nothing either way.
+                  return (Matched => False, Error => Error_None);
+               end if;
+               declare
+                  A : constant IP.IP_Address := IP.Parse_Address
+                    (EV.Text_Value.Data (1 .. EV.Text_Value.Length));
+               begin
+                  if A.Length = 0 then
+                     return (Matched => False, Error => Error_None);
+                  end if;
+                  if Has_Modifier (C.Modifiers, Mod_All) then
+                     for I in 1 .. C.Expected.Net_Count loop
+                        pragma Loop_Invariant
+                          (C.Expected.Net_Count <= Max_Values_Per_Sel);
+                        if not Valid_CIDR_Net (C.Expected.Nets (I)) then
+                           return (Matched => False,
+                                   Error => Error_Unsupported_Modifier);
+                        end if;
+                        if not IP.Contains (C.Expected.Nets (I), A) then
+                           return (Matched => False, Error => Error_None);
+                        end if;
+                     end loop;
+                     return (Matched => True, Error => Error_None);
+                  end if;
+                  for I in 1 .. C.Expected.Net_Count loop
+                     pragma Loop_Invariant
+                       (C.Expected.Net_Count <= Max_Values_Per_Sel);
+                     if not Valid_CIDR_Net (C.Expected.Nets (I)) then
+                        return (Matched => False,
+                                Error => Error_Unsupported_Modifier);
+                     end if;
+                     if IP.Contains (C.Expected.Nets (I), A) then
+                        return (Matched => True, Error => Error_None);
+                     end if;
+                  end loop;
+                  return (Matched => False, Error => Error_None);
+               end;
          end case;
       end;
    end Match_Field;

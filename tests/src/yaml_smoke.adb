@@ -47,15 +47,30 @@ procedure Yaml_Smoke is
       end if;
    end Load_File;
 
-   procedure Set_Event (Id : Integer; Cmd : String; Has_Cmd : Boolean := True) is
+   procedure Set_Event
+     (Id      : Integer;
+      Cmd     : String;
+      Has_Cmd : Boolean := True;
+      Ip      : String := "")
+   is
    begin
-      Event.Count := (if Has_Cmd then 2 else 1);
+      Event.Count :=
+        1 + (if Has_Cmd then 1 else 0) + (if Ip'Length > 0 then 1 else 0);
       Event.Fields (1).Name := To_Field_Name ("EventID").Value;
       Event.Fields (1).Value := (Kind => V_Int, Int_Value => Id);
       if Has_Cmd then
          Event.Fields (2).Name := To_Field_Name ("CommandLine").Value;
          Event.Fields (2).Value :=
            (Kind => V_Text, Text_Value => To_Event_Text (Cmd).Value);
+      end if;
+      if Ip'Length > 0 then
+         declare
+            Slot : constant Positive := (if Has_Cmd then 3 else 2);
+         begin
+            Event.Fields (Slot).Name := To_Field_Name ("SourceIp").Value;
+            Event.Fields (Slot).Value :=
+              (Kind => V_Text, Text_Value => To_Event_Text (Ip).Value);
+         end;
       end if;
    end Set_Event;
 
@@ -171,6 +186,57 @@ begin
    Load_File ("tests/corpus/4728_b64offset_list.yml",
               Load_Unsupported_Chain);
    Ada.Text_IO.Put_Line ("rejected: base64offset over list");
+
+   --  ---- P2: comparisons + CIDR, end to end ----
+
+   --  gt: strictly greater EventIDs match.
+   Load_File ("tests/corpus/4728_gt.yml");
+   Set_Event (4728, "run whoami");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "gt e2e match");
+   Set_Event (4727, "run whoami");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched, "gt e2e no");
+
+   --  IPv4 CIDR: inside matches, outside and garbage do not.
+   Load_File ("tests/corpus/4728_cidr4.yml");
+   Set_Event (4728, "x", Ip => "10.1.2.3");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "cidr4 e2e match");
+   Set_Event (4728, "x", Ip => "11.0.0.1");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched, "cidr4 e2e no");
+   Set_Event (4728, "x", Ip => "not.an.ip");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "cidr4 e2e malformed");
+
+   --  IPv6 CIDR end to end.
+   Load_File ("tests/corpus/4728_cidr6.yml");
+   Set_Event (4728, "x", Ip => "2001:db8::1");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "cidr6 e2e match");
+   Set_Event (4728, "x", Ip => "2001:db9::1");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched, "cidr6 e2e no");
+
+   --  Host bits mask: 192.168.1.1/24 covers .99 (lenient, see DESIGN).
+   Load_File ("tests/corpus/4728_cidr_host.yml");
+   Set_Event (4728, "x", Ip => "192.168.1.99");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "cidr host e2e");
+
+   --  Loader rejections for malformed comparison/CIDR rules.
+   Load_File ("tests/corpus/4728_gt_quoted.yml", Load_Bad_Integer);
+   Ada.Text_IO.Put_Line ("rejected: quoted comparison value");
+   Load_File ("tests/corpus/4728_gt_big.yml", Load_Bad_Integer);
+   Ada.Text_IO.Put_Line ("rejected: over-range comparison value");
+   Load_File ("tests/corpus/4728_cidr_bad.yml", Load_Bad_Value);
+   Ada.Text_IO.Put_Line ("rejected: bad CIDR prefix");
+   Load_File ("tests/corpus/4728_cidr_zeros.yml", Load_Bad_Value);
+   Ada.Text_IO.Put_Line ("rejected: leading-zero octet");
+   Load_File ("tests/corpus/4728_gtcidr.yml", Load_Unsupported_Chain);
+   Ada.Text_IO.Put_Line ("rejected: mixed operator chain");
 
    Ada.Text_IO.Put_Line ("yaml_smoke: matched as expected");
 end Yaml_Smoke;

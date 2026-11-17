@@ -1,0 +1,9 @@
+title: IPv6 CIDR match test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4728
+    SourceIp|cidr: '2001:db8::/32'
+  condition: selection

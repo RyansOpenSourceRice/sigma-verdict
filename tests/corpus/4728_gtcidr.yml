@@ -1,0 +1,9 @@
+title: Mixed operator chain rejection test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID|gt|cidr: 5
+    CommandLine|contains: 'whoami'
+  condition: selection

@@ -47,7 +47,13 @@ single value (lists refused with `Load_Unsupported_Chain`);
 ## P2 — Comparisons + CIDR (v4 + v6)
 `gt`/`gte`/`lt`/`lte` on the `E_Int` path; 32-bit and 128-bit prefix
 matching; malformed input fails closed. Boundary rejects non-numeric
-comparison values with `Load_Bad_Integer`.
+comparison values with `Load_Bad_Integer`. As built: IP parse/match
+lives in the standalone `Sigma_Verdict.IP` seam unit (core
+constructors + matching, boundary maps failures to `Load_Bad_Value`);
+host bits mask leniently (formal spec silent, documented divergence
+from pySigma strictness); `::`-compression, embedded IPv4 and bare-IP
+full prefixes supported; v4 sides compare in IPv6 space as
+`::ffff:0:0/96`. `neq` stays out of scope.
 
 ## P3 — Wildcards + `re` subset (largest proof cost)
 Unescaped `*`/`?` in a plain value already means wildcard in Sigma, so
@@ -87,4 +93,6 @@ per modifier/condition per D4.
 
 ## Non-goals (carried over)
 Multi-document YAML streams, query backends (this crate evaluates; it
-does not translate to SIEM queries), `near` semantics (D3).
+does not translate to SIEM queries), `near` semantics (D3),
+graduating `Sigma_Verdict.IP` to a standalone Alire crate (explicit
+future, shaped for by the seam).

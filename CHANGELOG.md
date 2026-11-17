@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 ### Added
+- Numeric comparisons (`gt`/`gte`/`lt`/`lte`) on the integer path,
+  end to end: bare plain integers only, else `Load_Bad_Integer`;
+  lists OR by default and AND with `all`. New public surface:
+  `E_CIDR`/`E_CIDR_List`, `IP_Network` matching, `Comparison_Of`.
+- CIDR prefix matching (v4 + full v6) via the new standalone
+  `Sigma_Verdict.IP` seam unit (see DESIGN.md "Library seams"):
+  strict dotted quads, single-`::` compression, embedded IPv4,
+  bare-IP full prefixes; host bits mask leniently (documented
+  divergence from pySigma strictness), everything ambiguous fails
+  closed. New loader errors: none (malformed networks reuse
+  `Load_Bad_Value`, mixed operators reuse `Load_Unsupported_Chain`).
 - Value-view modifiers end to end: `windash` (placeholder-exact
   5-way class, stride-aware matchers), `wide`/`utf16`/`utf16be`
   (NUL-interleaved views, BOM for `utf16`), `base64` (encoded-only)

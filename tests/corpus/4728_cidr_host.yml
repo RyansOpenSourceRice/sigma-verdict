@@ -1,0 +1,9 @@
+title: Host-bits masking acceptance test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4728
+    SourceIp|cidr: '192.168.1.1/24'
+  condition: selection
