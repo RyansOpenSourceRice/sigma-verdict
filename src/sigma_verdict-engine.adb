@@ -67,6 +67,21 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
       return R;
    end To_Pattern;
 
+   function To_View_Text (S : String) return View_Result is
+      R : View_Result;
+   begin
+      if S'Length > Max_View_Length then
+         return R;
+      end if;
+      R.Ok := True;
+      R.Value.Length := S'Length;
+      for I in 1 .. S'Length loop
+         pragma Loop_Invariant (R.Value.Length = S'Length);
+         R.Value.Data (I) := S (S'First + (I - 1));
+      end loop;
+      return R;
+   end To_View_Text;
+
    function Image_Of (F : Field_Name) return String is
      (F.Data (1 .. F.Length));
 
@@ -99,10 +114,12 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
          return Mod_Windash;
       elsif Same_Word (Token, "wide") then
          return Mod_Wide;
-      elsif Same_Word (Token, "utf16le") then
-         return Mod_UTF16LE;
+      --  Canonical pySigma 2.1.0 tokens only: "utf16le" is not one
+      --  (LE is spelled "wide"), so it falls through to Mod_Unknown.
       elsif Same_Word (Token, "utf16be") then
          return Mod_UTF16BE;
+      elsif Same_Word (Token, "utf16") then
+         return Mod_UTF16;
       elsif Same_Word (Token, "base64") then
          return Mod_Base64;
       elsif Same_Word (Token, "base64offset") then
@@ -145,11 +162,70 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
       Ok := True;
    end Add_Modifier;
 
-   function Chain_Supported (Set : Modifier_Set) return Boolean is
+   function Has_Modifier
+     (Set : Modifier_Set; M : Modifier_Kind) return Boolean
+   is
    begin
       for I in 1 .. Set.Count loop
          pragma Loop_Invariant (Set.Count <= Max_Modifiers_Per_Field);
-         if not Is_Supported_Modifier (Set.Items (I)) then
+         if Set.Items (I) = M then
+            return True;
+         end if;
+      end loop;
+      return False;
+   end Has_Modifier;
+
+   function Has_View_Modifier
+     (Set : Modifier_Set) return Boolean
+   is
+   begin
+      for I in 1 .. Set.Count loop
+         pragma Loop_Invariant (Set.Count <= Max_Modifiers_Per_Field);
+         if Set.Items (I) in Mod_Windash | Mod_Wide | Mod_UTF16LE
+           | Mod_UTF16BE | Mod_UTF16 | Mod_Base64 | Mod_Base64Offset
+         then
+            return True;
+         end if;
+      end loop;
+      return False;
+   end Has_View_Modifier;
+
+   function View_Token (Set : Modifier_Set) return Modifier_Kind is
+   begin
+      for I in 1 .. Set.Count loop
+         pragma Loop_Invariant (Set.Count <= Max_Modifiers_Per_Field);
+         if Set.Items (I) in Mod_Windash | Mod_Wide | Mod_UTF16LE
+           | Mod_UTF16BE | Mod_UTF16 | Mod_Base64 | Mod_Base64Offset
+         then
+            return Set.Items (I);
+         end if;
+      end loop;
+      return Mod_None;
+   end View_Token;
+
+   function Chain_Supported (Set : Modifier_Set) return Boolean is
+      Seen_Matcher : Boolean := False;
+      Seen_View    : Boolean := False;
+   begin
+      for I in 1 .. Set.Count loop
+         pragma Loop_Invariant (Set.Count <= Max_Modifiers_Per_Field);
+         if Is_Supported_Modifier (Set.Items (I)) then
+            --  At most one matching semantic per chain; several would
+            --  silently shadow each other, so the chain fails closed.
+            if Seen_Matcher then
+               return False;
+            end if;
+            Seen_Matcher := True;
+         elsif Set.Items (I) in Mod_Windash | Mod_Wide | Mod_UTF16LE
+           | Mod_UTF16BE | Mod_UTF16 | Mod_Base64 | Mod_Base64Offset
+         then
+            --  At most one view derivation per chain; mixing views
+            --  would stack encodings the core does not model.
+            if Seen_View then
+               return False;
+            end if;
+            Seen_View := True;
+         elsif Set.Items (I) not in Mod_Cased | Mod_All | Mod_Exists then
             return False;
          end if;
       end loop;
@@ -160,15 +236,18 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
    --  Matching --
    ----------------
 
-   function Fold (C : Character) return Character is
-     (if C in 'A' .. 'Z'
+   function Fold (C : Character; Sensitive : Boolean) return Character is
+     (if (not Sensitive) and then C in 'A' .. 'Z'
       then Character'Val (Character'Pos (C) + 32)
       else C);
 
-   function Equal_Folded (A, B : String) return Boolean is
+   function Equal_Folded
+     (A, B : String; Sensitive : Boolean) return Boolean
+   is
      (A'Length = B'Length
       and then (for all I in 0 .. A'Length - 1 =>
-                  Fold (A (A'First + I)) = Fold (B (B'First + I))));
+                  Fold (A (A'First + I), Sensitive) =
+                    Fold (B (B'First + I), Sensitive)));
 
    function Same_Bytes (A, B : String) return Boolean is
      (A'Length = B'Length
@@ -179,7 +258,9 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
      (A.Length = B.Length
       and then Same_Bytes (A.Data (1 .. A.Length), B.Data (1 .. B.Length)));
 
-   function Contains_At (Haystack, Needle : String) return Boolean is
+   function Contains_At
+     (Haystack, Needle : String; Sensitive : Boolean) return Boolean
+   is
       Match : Boolean;
    begin
       if Needle'Length = 0 then
@@ -193,8 +274,8 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
          for K in 0 .. Needle'Length - 1 loop
             pragma Loop_Invariant (Start <= Haystack'Length - Needle'Length);
             pragma Loop_Invariant (K <= Needle'Length - 1);
-            if Fold (Haystack (Haystack'First + Start + K)) /=
-              Fold (Needle (Needle'First + K))
+            if Fold (Haystack (Haystack'First + Start + K), Sensitive) /=
+              Fold (Needle (Needle'First + K), Sensitive)
             then
                Match := False;
                exit;
@@ -208,7 +289,9 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
       return False;
    end Contains_At;
 
-   function Starts_With_At (Haystack, Needle : String) return Boolean is
+   function Starts_With_At
+     (Haystack, Needle : String; Sensitive : Boolean) return Boolean
+   is
    begin
       if Needle'Length = 0 then
          return True;
@@ -218,8 +301,8 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
       end if;
       for K in 0 .. Needle'Length - 1 loop
          pragma Loop_Invariant (Needle'Length <= Haystack'Length);
-         if Fold (Haystack (Haystack'First + K)) /=
-           Fold (Needle (Needle'First + K))
+         if Fold (Haystack (Haystack'First + K), Sensitive) /=
+           Fold (Needle (Needle'First + K), Sensitive)
          then
             return False;
          end if;
@@ -227,8 +310,9 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
       return True;
    end Starts_With_At;
 
-   function Ends_With_At (Haystack, Needle : String) return Boolean is
-      Offset : constant Natural := Haystack'Length - Needle'Length;
+   function Ends_With_At
+     (Haystack, Needle : String; Sensitive : Boolean) return Boolean
+   is
    begin
       if Needle'Length = 0 then
          return True;
@@ -236,16 +320,161 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
       if Needle'Length > Haystack'Length then
          return False;
       end if;
-      for K in 0 .. Needle'Length - 1 loop
-         pragma Loop_Invariant (Offset = Haystack'Length - Needle'Length);
-         if Fold (Haystack (Haystack'First + Offset + K)) /=
-           Fold (Needle (Needle'First + K))
-         then
-            return False;
+      --  Offset is elaborated only after the guards above, so the
+      --  subtraction cannot underflow (fail-closed, no exception).
+      declare
+         Offset : constant Natural := Haystack'Length - Needle'Length;
+      begin
+         for K in 0 .. Needle'Length - 1 loop
+            pragma Loop_Invariant (Offset = Haystack'Length - Needle'Length);
+            pragma Loop_Invariant (Offset + K <= Haystack'Length);
+            if Fold (Haystack (Haystack'First + Offset + K), Sensitive) /=
+              Fold (Needle (Needle'First + K), Sensitive)
+            then
+               return False;
+            end if;
+         end loop;
+         return True;
+      end;
+   end Ends_With_At;
+
+   --  windash (P1b): a placeholder in the needle matches one of the
+   --  pySigma 5-way class — ASCII '-'/'/' or the UTF-8 bytes of
+   --  U+2013/U+2014/U+2015. Placeholder positions are 1-based over the
+   --  needle and arrive from the boundary, which mirrors the pySigma
+   --  rule (a '-'/'/' whose next character is a word character and
+   --  which is first or follows a non-word character).
+   function Is_Dash_At
+     (Dashes : Dash_Pos_Array; N : Dash_Count; Pos : Positive) return Boolean
+   is
+   begin
+      for I in 1 .. N loop
+         pragma Loop_Invariant (N <= Max_Dash_Places);
+         if Dashes (I) = Pos then
+            return True;
          end if;
       end loop;
-      return True;
-   end Ends_With_At;
+      return False;
+   end Is_Dash_At;
+
+   --  Tries to consume all of N starting at H (Start 0-based).
+   --  Matched reports whether the whole needle was consumed; Stop
+   --  holds the consumed haystack byte count either way.
+   type Consume_Result is record
+      Matched : Boolean := False;
+      Stop    : Natural := 0;
+   end record;
+
+   procedure Windash_Consume
+     (H : String; Start : Natural; N : String; Sensitive : Boolean;
+      Dashes : Dash_Pos_Array; Dash_N : Dash_Count;
+      Result : out Consume_Result)
+   is
+      HC     : Natural := Start;
+      NP_Off : Natural := 0;
+   begin
+      while NP_Off < N'Length loop
+         pragma Loop_Invariant (HC <= H'Length);
+         pragma Loop_Invariant (NP_Off <= N'Length);
+         pragma Loop_Variant (Increases => NP_Off);
+         --  NP_Off is a 0-based offset so every bound is static: the
+         --  live index N'First + NP_Off stays inside N'First ..
+         --  N'Last exactly like the proven linear matchers.
+         --  NP_Off advances only below N'Length - 1, HC by 1 only
+         --  below H'Length, and HC by 3 only below H'Length - 3
+         --  (H'Length >= 3 checked first, so no underflow).
+         if Is_Dash_At (Dashes, Dash_N, NP_Off + 1) then
+            if HC < H'Length
+              and then (H (H'First + HC) = '-'
+                        or else H (H'First + HC) = '/')
+            then
+               HC := HC + 1;
+            elsif H'Length >= 3
+              and then HC <= H'Length - 3
+              and then H (H'First + HC) = Character'Val (16#E2#)
+              and then H (H'First + HC + 1) = Character'Val (16#80#)
+              and then H (H'First + HC + 2) in Character'Val (16#93#)
+                | Character'Val (16#94#) | Character'Val (16#95#)
+            then
+               HC := HC + 3;
+            else
+               Result := (Matched => False, Stop => HC);
+               return;
+            end if;
+         else
+            if HC < H'Length
+              and then Fold (H (H'First + HC), Sensitive)
+                       = Fold (N (N'First + NP_Off), Sensitive)
+            then
+               HC := HC + 1;
+            else
+               Result := (Matched => False, Stop => HC);
+               return;
+            end if;
+         end if;
+         exit when NP_Off = N'Length - 1;
+         NP_Off := NP_Off + 1;
+      end loop;
+      Result := (Matched => True, Stop => HC);
+   end Windash_Consume;
+
+   function Windash_Contains_At
+     (Haystack, Needle : String; Sensitive : Boolean;
+      Dashes : Dash_Pos_Array; Dash_N : Dash_Count) return Boolean
+   is
+      R : Consume_Result;
+   begin
+      if Needle'Length = 0 then
+         return True;
+      end if;
+      for S in 0 .. Haystack'Length loop
+         Windash_Consume
+           (Haystack, S, Needle, Sensitive, Dashes, Dash_N, R);
+         if R.Matched then
+            return True;
+         end if;
+      end loop;
+      return False;
+   end Windash_Contains_At;
+
+   function Windash_Starts_With_At
+     (Haystack, Needle : String; Sensitive : Boolean;
+      Dashes : Dash_Pos_Array; Dash_N : Dash_Count) return Boolean
+   is
+      R : Consume_Result;
+   begin
+      Windash_Consume (Haystack, 0, Needle, Sensitive, Dashes, Dash_N, R);
+      return R.Matched;
+   end Windash_Starts_With_At;
+
+   function Windash_Ends_With_At
+     (Haystack, Needle : String; Sensitive : Boolean;
+      Dashes : Dash_Pos_Array; Dash_N : Dash_Count) return Boolean
+   is
+      R : Consume_Result;
+   begin
+      if Needle'Length = 0 then
+         return True;
+      end if;
+      for S in 0 .. Haystack'Length loop
+         Windash_Consume
+           (Haystack, S, Needle, Sensitive, Dashes, Dash_N, R);
+         if R.Matched and then R.Stop = Haystack'Length then
+            return True;
+         end if;
+      end loop;
+      return False;
+   end Windash_Ends_With_At;
+
+   function Windash_Equal
+     (Haystack, Needle : String; Sensitive : Boolean;
+      Dashes : Dash_Pos_Array; Dash_N : Dash_Count) return Boolean
+   is
+      R : Consume_Result;
+   begin
+      Windash_Consume (Haystack, 0, Needle, Sensitive, Dashes, Dash_N, R);
+      return R.Matched and then R.Stop = Haystack'Length;
+   end Windash_Equal;
 
    function Has_Prefix (Name, Prefix : Field_Name) return Boolean is
    begin
@@ -273,14 +502,18 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
    end Find_Field;
 
    --  Match one expected text against one haystack under the chain's
-   --  single matcher. The chain holds at most one matching semantic in
-   --  Phase 1 (the boundary rejects empty-vs-multiple matcher chains
-   --  beyond exact equality); the LAST matcher token wins if several
-   --  are present, and evaluation stays deterministic either way.
+   --  single matcher. Chain_Supported guarantees at most one matching
+   --  semantic reaches here (empty means exact equality); `cased`
+   --  selects case-sensitive comparison, otherwise folding applies.
+   --  With Mod_Windash the stride-aware variants run instead, using
+   --  the boundary-derived placeholder positions (1-based over
+   --  Needle); without the flag the dash table is ignored.
    function Text_Matches
-     (Haystack : String; Needle : String; Set : Modifier_Set) return Boolean
+     (Haystack : String; Needle : String; Set : Modifier_Set;
+      Dashes : Dash_Pos_Array; Dash_N : Dash_Count) return Boolean
    is
-      Kind : Modifier_Kind := Mod_None;
+      Kind      : Modifier_Kind := Mod_None;
+      Sensitive : constant Boolean := Has_Modifier (Set, Mod_Cased);
    begin
       for I in 1 .. Set.Count loop
          pragma Loop_Invariant (Set.Count <= Max_Modifiers_Per_Field);
@@ -288,24 +521,193 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
             Kind := Set.Items (I);
          end if;
       end loop;
+      if Has_Modifier (Set, Mod_Windash) then
+         case Kind is
+            when Mod_Contains =>
+               return Windash_Contains_At
+                 (Haystack, Needle, Sensitive, Dashes, Dash_N);
+            when Mod_Startswith =>
+               return Windash_Starts_With_At
+                 (Haystack, Needle, Sensitive, Dashes, Dash_N);
+            when Mod_Endswith =>
+               return Windash_Ends_With_At
+                 (Haystack, Needle, Sensitive, Dashes, Dash_N);
+            when others =>
+               return Windash_Equal
+                 (Haystack, Needle, Sensitive, Dashes, Dash_N);
+         end case;
+      end if;
       case Kind is
          when Mod_Contains =>
-            return Contains_At (Haystack, Needle);
+            return Contains_At (Haystack, Needle, Sensitive);
          when Mod_Startswith =>
-            return Starts_With_At (Haystack, Needle);
+            return Starts_With_At (Haystack, Needle, Sensitive);
          when Mod_Endswith =>
-            return Ends_With_At (Haystack, Needle);
+            return Ends_With_At (Haystack, Needle, Sensitive);
          when others =>
-            return Equal_Folded (Haystack, Needle);
+            return Equal_Folded (Haystack, Needle, Sensitive);
       end case;
    end Text_Matches;
+
+   Empty_View : constant Single_View :=
+     (Has_Alt => False,
+      Alt     => (Length => 0, Data => [others => ' ']),
+      Dash_N  => 0,
+      Dash_At => [others => 0]);
+
+   --  One item's view is consistent when alternatives and dashes do
+   --  not mix, dashes carry the windash flag, and every derived
+   --  byte rides with a matching view token in the chain.
+   function Single_Consistent
+     (V : Single_View; Set : Modifier_Set) return Boolean
+   is
+   begin
+      if V.Has_Alt and then V.Dash_N > 0 then
+         return False;
+      end if;
+      if V.Dash_N > 0 and then not Has_Modifier (Set, Mod_Windash) then
+         return False;
+      end if;
+      if V.Has_Alt and then not Has_View_Modifier (Set) then
+         return False;
+      end if;
+      if not V.Has_Alt and then V.Dash_N = 0
+        and then Has_View_Modifier (Set)
+        and then View_Token (Set) /= Mod_Windash
+      then
+         --  A non-windash view token that derived nothing: hand-built
+         --  garbage (the boundary always derives for those views).
+         return False;
+      end if;
+      return True;
+   end Single_Consistent;
+
+   --  Boundary/loader invariant for one constraint: views parallel
+   --  the text values exactly, base64offset rides alone on a single
+   --  value, and anything else bypassed the loader and fails closed.
+   function Views_Consistent (C : Field_Constraint) return Boolean is
+   begin
+      case C.Expected.Kind is
+         when E_Int | E_Int_List =>
+            return C.Views.Count = 0
+              and then not C.Views.Has_Offset
+              and then not Has_View_Modifier (C.Modifiers);
+         when E_Pattern =>
+            --  Rejected as Unsupported regardless of views.
+            return True;
+         when E_Text =>
+            if C.Views.Has_Offset then
+               return C.Views.Count = 1
+                 and then View_Token (C.Modifiers) = Mod_Base64Offset
+                 and then not C.Views.Items (1).Has_Alt
+                 and then C.Views.Items (1).Dash_N = 0;
+            end if;
+            if C.Views.Count > 1 then
+               return False;
+            end if;
+            if C.Views.Count = 1 then
+               return Single_Consistent (C.Views.Items (1), C.Modifiers);
+            end if;
+            return True;
+         when E_Text_List =>
+            if C.Views.Has_Offset then
+               --  base64offset needs one value; lists carrying it
+               --  are rejected at load, so this bypassed the loader.
+               return False;
+            end if;
+            if C.Views.Count /= 0
+              and then C.Views.Count /= C.Expected.Count
+            then
+               return False;
+            end if;
+            for I in 1 .. C.Views.Count loop
+               pragma Loop_Invariant
+                 (C.Views.Count <= Max_Values_Per_Sel);
+               if not Single_Consistent
+                 (C.Views.Items (I), C.Modifiers)
+               then
+                  return False;
+               end if;
+            end loop;
+            return True;
+      end case;
+   end Views_Consistent;
+
+   --  One expected value (raw needle plus its derived view) against
+   --  one haystack. Alternatives are OR-linked (pySigma
+   --  SigmaExpansion semantics, which stay OR even under `all`).
+   function Value_Matches
+     (Haystack : String; Raw : String; C : Field_Constraint;
+      Idx : Positive) return Boolean
+   with Pre => Idx in 1 .. Max_Values_Per_Sel
+   is
+   begin
+      if C.Views.Has_Offset then
+         for A in 1 .. Max_View_Alternatives loop
+            if Text_Matches
+              (Haystack,
+               C.Views.Offset (A).Data (1 .. C.Views.Offset (A).Length),
+               C.Modifiers, Empty_View.Dash_At, 0)
+            then
+               return True;
+            end if;
+         end loop;
+         return False;
+      end if;
+      declare
+         V : Single_View renames C.Views.Items (Idx);
+      begin
+         if V.Has_Alt then
+            return Text_Matches
+              (Haystack, V.Alt.Data (1 .. V.Alt.Length), C.Modifiers,
+               Empty_View.Dash_At, 0);
+         end if;
+         return Text_Matches
+           (Haystack, Raw, C.Modifiers, V.Dash_At, V.Dash_N);
+      end;
+   end Value_Matches;
 
    function Match_Field
      (C : Field_Constraint; Event : Event_Record) return Eval_Result
    is
       Slot : constant Natural := Find_Field (Event, C.Field);
    begin
+      --  Presence check. The boundary only ever loads sole-modifier
+      --  boolean values here; anything else fails closed as defence
+      --  in depth (hand-built rules bypass the loader).
+      if Has_Modifier (C.Modifiers, Mod_Exists) then
+         if C.Modifiers.Count /= 1 then
+            return (Matched => False, Error => Error_Unsupported_Modifier);
+         end if;
+         case C.Expected.Kind is
+            when E_Int =>
+               return (Matched => (Slot /= 0) = (C.Expected.Int_Value /= 0),
+                       Error   => Error_None);
+            when E_Text =>
+               declare
+                  T : constant String :=
+                    C.Expected.Single.Data (1 .. C.Expected.Single.Length);
+               begin
+                  if Equal_Folded (T, "true", False) then
+                     return (Matched => Slot /= 0, Error => Error_None);
+                  elsif Equal_Folded (T, "false", False) then
+                     return (Matched => Slot = 0, Error => Error_None);
+                  else
+                     return (Matched => False,
+                             Error   => Error_Unsupported_Modifier);
+                  end if;
+               end;
+            when E_Int_List | E_Text_List | E_Pattern =>
+               return (Matched => False,
+                       Error   => Error_Unsupported_Modifier);
+         end case;
+      end if;
       if not Chain_Supported (C.Modifiers) then
+         return (Matched => False, Error => Error_Unsupported_Modifier);
+      end if;
+      if not Views_Consistent (C) then
+         --  Views must parallel the text values exactly (loader
+         --  invariant); anything else bypassed the loader.
          return (Matched => False, Error => Error_Unsupported_Modifier);
       end if;
       if C.Expected.Kind = E_Pattern then
@@ -328,6 +730,20 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
                if EV.Kind /= V_Int then
                   return (Matched => False, Error => Error_None);
                end if;
+               if C.Expected.Int_Count = 0 then
+                  --  An empty list matches nothing either way.
+                  return (Matched => False, Error => Error_None);
+               end if;
+               if Has_Modifier (C.Modifiers, Mod_All) then
+                  for I in 1 .. C.Expected.Int_Count loop
+                     pragma Loop_Invariant
+                       (C.Expected.Int_Count <= Max_Values_Per_Sel);
+                     if EV.Int_Value /= C.Expected.Ints (I) then
+                        return (Matched => False, Error => Error_None);
+                     end if;
+                  end loop;
+                  return (Matched => True, Error => Error_None);
+               end if;
                for I in 1 .. C.Expected.Int_Count loop
                   pragma Loop_Invariant
                     (C.Expected.Int_Count <= Max_Values_Per_Sel);
@@ -340,10 +756,10 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
                if EV.Kind /= V_Text then
                   return (Matched => False, Error => Error_None);
                end if;
-               if Text_Matches
+               if Value_Matches
                  (EV.Text_Value.Data (1 .. EV.Text_Value.Length),
                   C.Expected.Single.Data (1 .. C.Expected.Single.Length),
-                  C.Modifiers)
+                  C, 1)
                then
                   return (Matched => True, Error => Error_None);
                end if;
@@ -352,14 +768,33 @@ package body Sigma_Verdict.Engine with SPARK_Mode is
                if EV.Kind /= V_Text then
                   return (Matched => False, Error => Error_None);
                end if;
+               if C.Expected.Count = 0 then
+                  --  An empty list matches nothing either way.
+                  return (Matched => False, Error => Error_None);
+               end if;
+               if Has_Modifier (C.Modifiers, Mod_All) then
+                  for I in 1 .. C.Expected.Count loop
+                     pragma Loop_Invariant
+                       (C.Expected.Count <= Max_Values_Per_Sel);
+                     if not Value_Matches
+                       (EV.Text_Value.Data (1 .. EV.Text_Value.Length),
+                        C.Expected.Items (I).Data
+                          (1 .. C.Expected.Items (I).Length),
+                        C, I)
+                     then
+                        return (Matched => False, Error => Error_None);
+                     end if;
+                  end loop;
+                  return (Matched => True, Error => Error_None);
+               end if;
                for I in 1 .. C.Expected.Count loop
                   pragma Loop_Invariant
                     (C.Expected.Count <= Max_Values_Per_Sel);
-                  if Text_Matches
+                  if Value_Matches
                     (EV.Text_Value.Data (1 .. EV.Text_Value.Length),
                      C.Expected.Items (I).Data
                        (1 .. C.Expected.Items (I).Length),
-                     C.Modifiers)
+                     C, I)
                   then
                      return (Matched => True, Error => Error_None);
                   end if;

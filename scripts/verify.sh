@@ -1,9 +1,11 @@
 #!/bin/sh
 #  scripts/verify.sh — full local gate: build + tests + flow proof.
-#  Silver level 2 is attempted with a bounded budget; flow (proved) is
-#  the blocking gate until silver closes (see DESIGN.md).
+#  Flow (proved) is the blocking gate; silver level 2 runs separately
+#  in CI (prove-silver, non-blocking) — see DESIGN.md.
+#  All alr invocations are non-interactive (-n) so this also runs on
+#  fresh machines/CI with no toolchain or indexes installed yet.
 set -eu
-eval "$(alr printenv)"
+eval "$(alr -n printenv)"
 alr -n build
 sh scripts/alr-test.sh
 gnatprove -P proof/spark_core.gpr --mode=flow

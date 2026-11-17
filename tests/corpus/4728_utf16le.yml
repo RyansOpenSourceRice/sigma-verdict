@@ -1,0 +1,9 @@
+title: Non-canonical utf16le rejection test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4728
+    CommandLine|utf16le: 'AB'
+  condition: selection

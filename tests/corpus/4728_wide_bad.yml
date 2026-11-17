@@ -1,0 +1,9 @@
+title: Wide non-ASCII rejection test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4728
+    CommandLine|wide: 'cafés'
+  condition: selection

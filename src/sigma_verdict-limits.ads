@@ -45,4 +45,8 @@ package Sigma_Verdict.Limits with SPARK_Mode is
    --  Raw pattern text kept for Phase 2 matchers (re/wildcard).
    Default_Pattern_Length : constant := 256;
 
+   --  Derived value views (P1b): the widest derivation is UTF-16 with
+   --  BOM over a full-length value (2 bytes per byte plus 2 BOM bytes).
+   Default_View_Length : constant := 2 * Default_Value_Length + 2;
+
 end Sigma_Verdict.Limits;

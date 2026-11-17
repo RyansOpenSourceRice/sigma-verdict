@@ -26,11 +26,13 @@ package Sigma_Verdict.Boundary with SPARK_Mode => Off is
       Load_Too_Many_Values,
       Load_Too_Many_Nodes,
       Load_Too_Many_Modifiers,
-      Load_Unknown_Modifier,
-      Load_Unknown_Condition,
-      Load_Bad_Integer,
-      Load_Empty_Rule,
-      Load_Internal);
+       Load_Unknown_Modifier,
+       Load_Unknown_Condition,
+        Load_Bad_Integer,
+        Load_Bad_Value,
+        Load_Unsupported_Chain,
+        Load_Empty_Rule,
+        Load_Internal);
 
    --  Parse one Sigma rule document (UTF-8 YAML text) into Compiled_Rule.
    --  Only the detection/logsource subset of SPECIFICATION.md is read;

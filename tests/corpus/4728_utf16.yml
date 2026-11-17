@@ -1,0 +1,9 @@
+title: UTF-16 BOM view match test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4728
+    CommandLine|utf16: 'AB'
+  condition: selection
