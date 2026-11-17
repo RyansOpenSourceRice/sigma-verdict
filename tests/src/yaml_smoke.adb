@@ -19,7 +19,7 @@ procedure Yaml_Smoke is
       end if;
    end Check;
 
-   procedure Load_File (Path : String) is
+   procedure Load_File (Path : String; Want : Load_Error := Load_Ok) is
       F      : Ada.Text_IO.File_Type;
       Text   : String (1 .. 4096);
       Last   : Natural := 0;
@@ -40,8 +40,8 @@ procedure Yaml_Smoke is
       end loop;
       Ada.Text_IO.Close (F);
       Load_Detection (Text (1 .. Last), Rule, Error, Detail);
-      if Error /= Load_Ok then
-         Ada.Text_IO.Put_Line ("LOAD FAILED: " & Load_Error'Image (Error) &
+      if Error /= Want then
+         Ada.Text_IO.Put_Line ("UNEXPECTED LOAD: " & Load_Error'Image (Error) &
                                  " at" & Natural'Image (Detail));
          raise Program_Error with "yaml load failed: " & Path;
       end if;
@@ -95,6 +95,82 @@ begin
    Set_Event (4728, "whoami /all");
    R := Evaluate (Rule, Event);
    Check (R.Error = Error_None and then not R.Matched, "all one missing");
+
+   --  ---- P1b: value views, end to end ----
+
+   --  windash placeholder: the slash form matches, the literal
+   --  reading stays intact.
+   Load_File ("tests/corpus/4728_windash.yml");
+   Set_Event (4728, "run /nop /quiet");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "windash e2e slash");
+   Set_Event (4728, "run nop");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "windash e2e absent");
+
+   --  wide replaces the value: interleaved bytes match, plain does not.
+   Load_File ("tests/corpus/4728_wide.yml");
+   Set_Event (4728, "xxA" & Character'Val (0) &
+                      "B" & Character'Val (0) & "yy");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "wide e2e");
+   Set_Event (4728, "xxAByy");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "wide e2e plain");
+
+   --  utf16: exact bytes including the BOM.
+   Load_File ("tests/corpus/4728_utf16.yml");
+   Set_Event (4728, Character'Val (16#FF#) & Character'Val (16#FE#) &
+                       "A" & Character'Val (0) &
+                       "B" & Character'Val (0));
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "utf16 e2e");
+   Set_Event (4728, "A" & Character'Val (0) &
+                      "B" & Character'Val (0));
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "utf16 e2e no bom");
+
+   --  base64: digest matches, the plain value does not.
+   Load_File ("tests/corpus/4728_base64.yml");
+   Set_Event (4728, "log d2hvYW1p end");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "base64 e2e");
+   Set_Event (4728, "run whoami");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "base64 e2e plain");
+
+   --  base64offset: every phase matches through the same rule.
+   Load_File ("tests/corpus/4728_b64offset.yml");
+   Set_Event (4728, "xxd2hvYW1p");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "b64offset e2e 0");
+   Set_Event (4728, "xxdob2Fta");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "b64offset e2e 1");
+   Set_Event (4728, "xx3aG9hbW");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "b64offset e2e 2");
+   Set_Event (4728, "run whoami");
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "b64offset e2e plain");
+
+   --  Loader rejections for malformed view rules.
+   Load_File ("tests/corpus/4728_windash4.yml", Load_Bad_Value);
+   Ada.Text_IO.Put_Line ("rejected: windash over-limit");
+   Load_File ("tests/corpus/4728_wide_bad.yml", Load_Bad_Value);
+   Ada.Text_IO.Put_Line ("rejected: wide non-ascii");
+   Load_File ("tests/corpus/4728_utf16le.yml", Load_Unknown_Modifier);
+   Ada.Text_IO.Put_Line ("rejected: non-canonical utf16le");
+   Load_File ("tests/corpus/4728_intview.yml", Load_Bad_Value);
+   Ada.Text_IO.Put_Line ("rejected: view over integer");
+   Load_File ("tests/corpus/4728_b64offset_list.yml",
+              Load_Unsupported_Chain);
+   Ada.Text_IO.Put_Line ("rejected: base64offset over list");
 
    Ada.Text_IO.Put_Line ("yaml_smoke: matched as expected");
 end Yaml_Smoke;

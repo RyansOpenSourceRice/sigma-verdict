@@ -34,6 +34,7 @@ generic
    Max_Condition_Nodes     : Positive := Limits.Default_Condition_Nodes;
    Max_Modifiers_Per_Field : Positive := Limits.Default_Modifiers_Per_Field;
    Max_Pattern_Length      : Positive := Limits.Default_Pattern_Length;
+   Max_View_Length         : Positive := Limits.Default_View_Length;
 package Sigma_Verdict.Engine with SPARK_Mode is
 
    ----------------
@@ -88,6 +89,24 @@ package Sigma_Verdict.Engine with SPARK_Mode is
       Value : Pattern_Text;
    end record;
 
+   --  One derived value view (P1b): the boundary expands view modifiers
+   --  (wide/base64/...) into these bounded byte strings and the core
+   --  matches over them with the existing linear matchers. The
+   --  constructor is the only way to build one, so over-long
+   --  derivations fail fast instead of producing unprovable slices.
+   type View_Text is record
+      Length : Natural := 0;
+      Data   : String (1 .. Max_View_Length) := [others => ' '];
+   end record
+     with Dynamic_Predicate => View_Text.Length <= Max_View_Length;
+
+   type View_Result is record
+      Ok    : Boolean := False;
+      Value : View_Text;
+   end record;
+
+   function To_View_Text (S : String) return View_Result;
+
    function To_Field_Name (S : String) return Field_Result;
    function To_Value_Text (S : String) return Value_Result;
    function To_Event_Text (S : String) return Event_Text_Result;
@@ -100,18 +119,20 @@ package Sigma_Verdict.Engine with SPARK_Mode is
    --  Modifiers --
    -----------------
 
-   --  Full Sigma modifier surface (sigmahq.io/docs/basics/modifiers).
-   --  Phase 1a evaluates matchers (bare/contains/startswith/endswith),
-   --  the case flag (cased), list conjunction (all) and presence
-   --  (exists); the rest (including Mod_Unknown, which the boundary
-   --  must reject at load) fail closed with Error_Unsupported_Modifier.
+   --  Full Sigma modifier surface (sigmahq.io/docs/basics/modifiers,
+   --  pySigma 2.1.0 taxonomy). Phase 1 evaluates matchers
+   --  (bare/contains/startswith/endswith), the case flag (cased),
+   --  list conjunction (all), presence (exists) and value views
+   --  (windash, wide/utf16*, base64*); the rest (including
+   --  Mod_Unknown, which the boundary must reject at load) fails
+   --  closed with Error_Unsupported_Modifier.
    type Modifier_Kind is
      (Mod_None,
       Mod_Contains, Mod_Startswith, Mod_Endswith,
       Mod_Re, Mod_Re_I, Mod_Re_M, Mod_Re_S,
       Mod_Wildcard,
       Mod_Windash,
-      Mod_Wide, Mod_UTF16LE, Mod_UTF16BE,
+      Mod_Wide, Mod_UTF16LE, Mod_UTF16BE, Mod_UTF16,
       Mod_Base64, Mod_Base64Offset,
       Mod_Cased,
       Mod_All,
@@ -150,12 +171,50 @@ package Sigma_Verdict.Engine with SPARK_Mode is
    function Has_Modifier (Set : Modifier_Set; M : Modifier_Kind) return Boolean;
    --  True iff M occurs anywhere in the chain.
 
+   function Has_View_Modifier (Set : Modifier_Set) return Boolean;
+   --  True iff the chain holds any value-view token (windash,
+   --  wide/utf16le/utf16be/utf16, base64/base64offset).
+
+   function View_Token (Set : Modifier_Set) return Modifier_Kind;
+   --  First view token in the chain, or Mod_None when there is none.
+
    function Chain_Supported (Set : Modifier_Set) return Boolean;
    --  True iff the chain holds at most one matcher token
-   --  (bare/contains/startswith/endswith) plus any combination of the
-   --  structural flags (cased/all/exists). Anything else — views,
-   --  comparisons, patterns, unknown tokens, or several matchers —
-   --  fails closed with Error_Unsupported_Modifier.
+   --  (bare/contains/startswith/endswith), at most one view token,
+   --  plus any combination of the structural flags (cased/all/
+   --  exists). Anything else — comparisons, patterns, unknown
+   --  tokens, several matchers, or mixed views — fails closed with
+   --  Error_Unsupported_Modifier.
+
+   --------------------------------
+   --  Derived value views (P1b) --
+   --------------------------------
+
+   --  base64offset fans one value into exactly three alternatives.
+   Max_View_Alternatives : constant := 3;
+   type Offset_Alts is array (1 .. Max_View_Alternatives) of View_Text;
+
+   --  windash expands at most three dash occurrences per value
+   --  (pySigma SigmaWindowsDashModifier.max_expanded_dashes).
+   Max_Dash_Places : constant := 3;
+   subtype Dash_Count is Natural range 0 .. Max_Dash_Places;
+   type Dash_Pos_Array is array (1 .. Max_Dash_Places) of Natural;
+
+   --  One single-alternative derived view: either boundary-derived
+   --  bytes (wide/utf16/base64, matched instead of the raw needle)
+   --  or a windash dash mask over the raw needle (1-based positions;
+   --  Dash_N > 0 requires Mod_Windash). Alternatives and dashes never
+   --  mix. Neither set means "match the raw needle".
+   type Single_View is record
+      Has_Alt : Boolean := False;
+      Alt     : View_Text :=
+        (Length => 0, Data => [others => ' ']);
+      Dash_N  : Dash_Count := 0;
+      Dash_At : Dash_Pos_Array := [others => 0];
+   end record;
+
+   type Single_View_Array is
+     array (1 .. Max_Values_Per_Sel) of Single_View;
 
    ----------------
    --  Selections --
@@ -166,6 +225,21 @@ package Sigma_Verdict.Engine with SPARK_Mode is
    subtype Value_Count is Natural range 0 .. Max_Values_Per_Sel;
    type Value_Text_Array is array (1 .. Max_Values_Per_Sel) of Value_Text;
    type Int_Array is array (1 .. Max_Values_Per_Sel) of Integer;
+
+   --  All derived views of one field constraint, parallel to the
+   --  text values: E_Text uses Items (1) when Count = 1 (or Offset
+   --  when the view is base64offset, which requires a single value);
+   --  an E_Text_List with N items uses Items (1 .. N) when
+   --  Count = N; otherwise Count is 0 and the raw needles match.
+   --  Nested so future view changes never touch field aggregates:
+   --  `Views => (others => <>)` stays valid.
+   type Field_Views is record
+      Items      : Single_View_Array := [others => <>];
+      Offset     : Offset_Alts :=
+        [others => (Length => 0, Data => [others => ' '])];
+      Has_Offset : Boolean := False;
+      Count      : Value_Count := 0;
+   end record;
 
    type Expected_Value (Kind : Expected_Kind := E_Text) is record
       case Kind is
@@ -188,6 +262,9 @@ package Sigma_Verdict.Engine with SPARK_Mode is
       Field     : Field_Name;
       Modifiers : Modifier_Set;
       Expected  : Expected_Value;
+      --  Boundary-derived views (P1b). Defaults keep every existing
+      --  aggregate compiling: pass `Views => (others => <>)`.
+      Views     : Field_Views := (others => <>);
    end record;
 
    subtype Field_Index is Natural range 0 .. Max_Fields_Per_Sel;

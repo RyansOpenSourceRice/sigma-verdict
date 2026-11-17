@@ -1,0 +1,11 @@
+title: Base64offset over list rejection test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4728
+    CommandLine|contains|base64offset:
+      - whoami
+      - hostname
+  condition: selection

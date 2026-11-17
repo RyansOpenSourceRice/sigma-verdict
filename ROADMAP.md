@@ -35,13 +35,14 @@ machinery. `exists` is standalone with a boolean value at load.
 in the matcher — canonical folding would over-match, so no
 canonicalization), `wide`/`utf16le`/`utf16be` (NUL-interleaved views,
 ASCII-only needles, rejected at load otherwise),
-`utf16` (BOM variant — needs a new `Modifier_Kind` literal),
-`base64` (encoded form only, never the plain value),
-`base64offset` (exact 3-phase construction per pySigma: prepend 0/1/2
-spaces, encode, cut per offset). View derivation is pure, bounded and
-total, so it lives in the core where SPARK can prove it; the boundary
-only validates chain legality. `wide`-family and `base64`-family never
-mix in one chain (`Unsupported`).
+`utf16` (BOM variant), `base64` (encoded form only, never the plain
+value), `base64offset` (exact 3-phase construction per pySigma: prepend
+0/1/2 spaces, encode, cut per offset). As built: derivation lives in
+the boundary (auditable, SPARK off); the core matches over derived
+bytes plus stride-aware windash matchers. `base64offset` requires a
+single value (lists refused with `Load_Unsupported_Chain`);
+`wide`-family and `base64`-family never mix in one chain
+(`Unsupported`); `utf16le` is not a canonical token (rejected).
 
 ## P2 — Comparisons + CIDR (v4 + v6)
 `gt`/`gte`/`lt`/`lte` on the `E_Int` path; 32-bit and 128-bit prefix

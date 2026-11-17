@@ -1,0 +1,9 @@
+title: Wide view match test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4728
+    CommandLine|contains|wide: 'AB'
+  condition: selection

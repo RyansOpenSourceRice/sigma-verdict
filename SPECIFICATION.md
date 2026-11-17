@@ -19,8 +19,9 @@
 |---|---|---|
 | Matchers: exact, `contains`, `startswith`, `endswith` | evaluate | — |
 | Flags: `cased`, `all`, `exists` | evaluate | — |
-| Illegal chains (several matchers, views, patterns) | `Unsupported` | — |
-| Views: `windash`, `wide`/`utf16*`, `base64*` | `Unsupported` | P1b |
+| Views: `windash`, `wide`/`utf16`/`utf16be`, `base64`, `base64offset` | evaluate | — |
+| Illegal chains (several matchers, mixed views, patterns) | `Unsupported` | — |
+| `utf16le` (non-canonical), views over integers, `base64offset` over lists | `Load_Unknown_Modifier` / `Load_Bad_Value` / `Load_Unsupported_Chain` | — |
 | `gt`/`gte`/`lt`/`lte`, `cidr` (v4+v6) | `Unsupported` | P2 |
 | Wildcards (implicit + explicit), `re` subset, `fieldref`, `expand` | `Unsupported` | P3 |
 | Conditions: `AND`/`OR`/`NOT`, `1 of`/`all of`, parens, `count()` | parens/`count()` `Unsupported` | P4 |

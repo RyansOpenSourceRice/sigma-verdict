@@ -22,6 +22,7 @@ package Sigma_Verdict.Defaults with SPARK_Mode is
       Max_Event_Fields        => Limits.Default_Event_Fields,
       Max_Condition_Nodes     => Limits.Default_Condition_Nodes,
       Max_Modifiers_Per_Field => Limits.Default_Modifiers_Per_Field,
-      Max_Pattern_Length      => Limits.Default_Pattern_Length);
+      Max_Pattern_Length      => Limits.Default_Pattern_Length,
+      Max_View_Length         => Limits.Default_View_Length);
 
 end Sigma_Verdict.Defaults;

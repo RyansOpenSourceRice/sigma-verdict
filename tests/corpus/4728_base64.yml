@@ -1,0 +1,9 @@
+title: Base64 view match test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4728
+    CommandLine|contains|base64: 'whoami'
+  condition: selection

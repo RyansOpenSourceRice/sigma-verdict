@@ -1,0 +1,9 @@
+title: Windash over-limit rejection test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4728
+    CommandLine|windash|contains: '-a -b -c -d'
+  condition: selection

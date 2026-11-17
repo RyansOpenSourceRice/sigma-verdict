@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
+### Added
+- Value-view modifiers end to end: `windash` (placeholder-exact
+  5-way class, stride-aware matchers), `wide`/`utf16`/`utf16be`
+  (NUL-interleaved views, BOM for `utf16`), `base64` (encoded-only)
+  and `base64offset` (exact 3-phase alternatives, OR-linked even
+  under `all`). New public surface: `View_Text`/`To_View_Text`,
+  `Mod_UTF16`, view legality in `Chain_Supported`, `Field_Views`,
+  `Load_Unsupported_Chain` (base64offset over lists), `Max_View_Length`
+  capacity. Canonical pySigma 2.1.0 tokens only: `utf16le` now loads
+  as `Load_Unknown_Modifier`; views over integers are `Load_Bad_Value`.
 ### Fixed
 - YAML list values now accumulate on the owning selection frame
   (scalars arrive while the sequence's skip frame is on top) and

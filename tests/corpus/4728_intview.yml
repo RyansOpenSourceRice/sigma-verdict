@@ -1,0 +1,9 @@
+title: View over integer rejection test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID|wide: 4728
+    CommandLine|contains: 'whoami'
+  condition: selection
