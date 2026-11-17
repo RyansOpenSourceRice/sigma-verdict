@@ -55,15 +55,29 @@ from pySigma strictness); `::`-compression, embedded IPv4 and bare-IP
 full prefixes supported; v4 sides compare in IPv6 space as
 `::ffff:0:0/96`. `neq` stays out of scope.
 
-## P3 — Wildcards + `re` subset (largest proof cost)
-Unescaped `*`/`?` in a plain value already means wildcard in Sigma, so
-the boundary detects implicit wildcards and routes them to the pattern
-path — required for "any rule", not just explicit modifiers. Glob
-`*`/`?` compile to NFA; `re` subset (literals, `. * + ?`, classes,
-`^$`, `i`/`m`/`s`) runs on a Thompson NFA Pike VM with explicit step
-fuel (norm: `shacl-ada` `sh:pattern`). No `GNAT.Regpat` anywhere
-(backtracking ReDoS, AdaCore Gem #25). `fieldref` + `expand` compose
-here.
+## P3a — Wildcards + `re` subset (as built)
+Unescaped `*`/`?` in a plain value already mean wildcard in Sigma,
+so the boundary detects implicit wildcards and routes them to the
+pattern path — required for "any rule", not just explicit
+modifiers. Glob `*`/`?` compile to NFA; the `re` spec PCRE subset
+(literals, `. * + ?`, `{n,m}`, classes, `^$`, alternation,
+grouping, `i`/`m`/`s`) runs on a Thompson NFA Pike VM with static
+loop bounds (norm: `shacl-ada` `sh:pattern`). No `GNAT.Regpat`
+anywhere (backtracking ReDoS, AdaCore Gem #25). Out-of-subset
+constructs fail closed as a named `Load_Unsupported_Pattern`
+(growing-subset table in SPECIFICATION.md); malformed patterns as
+`Load_Bad_Value`. Literal values unescape Sigma backslashes at
+load. As built: boundary compiles to variable-length NFA bytecode
+(Appel-style in-code patch chains, uniform pending exits, reserved
+entry jump, over-budget aborts as `Load_Too_Long`); the core
+executes one left-to-right pass with per-access guards.
+
+## P3b — `fieldref` + `expand` (shaped, not started)
+Match-time equality against another event field (`fieldref`;
+missing field is a clean non-match) and `%name%` substitution from
+a caller-owned placeholder map (`expand`, D1-consistent; unknown
+placeholder is `Unsupported`). Both reuse the P3a match path, so
+P3b is wiring plus tests, not new proof machinery.
 
 ## P4 — Condition grammar
 Parentheses, `NOT` binding, `1 of them` / `all of them`, generalized

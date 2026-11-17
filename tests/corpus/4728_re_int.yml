@@ -1,0 +1,9 @@
+title: Regex over integer rejection test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4728
+    CommandLine|re: 123
+  condition: selection

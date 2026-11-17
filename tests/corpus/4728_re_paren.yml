@@ -1,0 +1,9 @@
+title: Unbalanced regex rejection test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4728
+    CommandLine|re: '(evil'
+  condition: selection

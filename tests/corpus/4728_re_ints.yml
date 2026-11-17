@@ -1,0 +1,11 @@
+title: Regex integer list rejection test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4728
+    CommandLine|re:
+      - 123
+      - 456
+  condition: selection

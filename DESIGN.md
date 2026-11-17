@@ -31,13 +31,15 @@ YAML text --[boundary, SPARK off]--> Compiled_Rule --[core, SPARK Silver]--> Eva
   mirroring the P1a equality path; event data is untrusted input,
   while a malformed stored rule fails closed as `Unsupported`.
 - CIDR matching is exact prefix math over parsed bytes. Host bits
-  mask leniently (the formal Sigma spec is silent on host-bits-set
-  networks, so operational use wins over pySigma's strict compile
-  rejection — documented divergence); everything ambiguous fails
-  closed: leading-zero octets (octal trap), zone IDs, multiple `::`,
-  bad prefixes. IPv4 sides compare in IPv6 space as `::ffff:0:0/96`,
-  so v4 rules/events mix with v6 exactly; malformed event IPs are
-  clean non-matches.
+  mask leniently: the formal Sigma specification is silent on
+  host-bits-set networks, and on-host matching treats the stated
+  prefix as authoritative, matching the network it denotes; a
+  stricter compile-time rejection exists in other tooling, and the
+  lenient behavior is documented here so rule authors can rely on
+  it. Everything ambiguous fails closed: leading-zero octets
+  (octal trap), zone IDs, multiple `::`, bad prefixes. IPv4 sides
+  compare in IPv6 space as `::ffff:0:0/96`, so v4 rules/events mix
+  with v6 exactly; malformed event IPs are clean non-matches.
 - Full `Modifier_Kind` enumeration designed in from day one
   (`https://sigmahq.io/docs/basics/modifiers.html`, pySigma 2.1.0
   taxonomy); Phase 1 evaluates bare/`contains`/`startswith`/`endswith`,
@@ -62,17 +64,43 @@ YAML text --[boundary, SPARK off]--> Compiled_Rule --[core, SPARK Silver]--> Eva
   at load (`Load_Unsupported_Chain`), as are `utf16le` (not a
   canonical pySigma token) and views over integers.
 - `Compiled_Rule` static size is dominated by the view tables
-  (~1KB per value slot); `Empty_Rule` copies are avoided on hot paths
-  (in-place `Clear_Rule`) so worst-case-capacity rules stay inside a
-  default 8 MB stack. Deployments that shrink capacities must keep
-  `Max_View_Length >= 2 * Max_Value_Length + 2` or wide derivations
-  fail with `Load_Too_Long`.
+  (~1KB per value slot) and the pattern programs (~2KB per value
+  slot); `Empty_Rule` copies are avoided on hot paths
+  (in-place `Clear_Rule` assigns counts only — a whole-rule
+  aggregate transient overflowed the 8 MB test stack once the
+  16-program pattern lists landed) so worst-case-capacity rules
+  stay inside a default 8 MB stack. Deployments that shrink
+  capacities must keep `Max_View_Length >= 2 * Max_Value_Length + 2`
+  or wide derivations fail with `Load_Too_Long`.
 - Condition tree (`Compiled_Rule.Nodes`) answers `1 of`/`all of`;
   `near`/`count` reserved as explicit errors.
 - Recursion in `Eval_Node` carries fuel (`Max_Condition_Nodes`) so a
   cyclic node graph fails closed instead of overflowing the stack.
 - No `use` clauses across package boundaries in spec files; explicit
   qualification keeps SPARK flow analysis cheap.
+
+## Pattern engine (P3a)
+
+Glob (`*`/`?`, implicit or explicit) and the spec PCRE subset
+compile in the boundary to Thompson NFA bytecode; the core runs one
+left-to-right Pike VM pass per field. Programs are variable-length
+bytecode in fixed buffers (not state-record tables: sixteen table
+programs per pattern list could not stay stack-resident), with a
+reserved entry jump, absolute 2-byte targets, ASCII case folding
+baked into literals, and per-program fold/multiline/anchor flags
+from the chain. Anchors are orthogonal to the pattern: bare glob
+full-matches, bare `re` searches, `contains`/`startswith`/`endswith`
+tighten entry/exit for either. Explicit `^`/`$` assert inside the
+pattern with PCRE `$`-before-final-LF semantics; `m` makes them
+per-line; `s` (and glob stars, always) lets matches cross `\n`.
+
+The VM uses only static `for` loops (closure bound = code length +
+1 per position; pushes are visited-capped) so termination needs no
+fuel argument; every decode is per-access guarded, so hand-built
+garbage programs degrade to removed edges (fail-closed toward
+non-match) or a loud `Error_Invalid_Rule`, never a mis-index.
+Worst case is ~5 steps per (position, code byte) — bounded, usually
+tiny, and documented so deployments can budget it.
 
 ## Library seams
 `Sigma_Verdict.IP` (IP parsing + prefix matching) is built, not

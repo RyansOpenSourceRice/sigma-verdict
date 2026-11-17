@@ -68,18 +68,19 @@ package IP renames Sigma_Verdict.IP;
       end if;
    end Fail;
 
-   --  Reset an out rule without routing a whole Compiled_Rule through
-   --  a function return (secondary-stack transient proportional to
-   --  the view tables). Equivalent to Empty_Rule: every component
-   --  already carries its empty default except the three counts.
-   procedure Clear_Rule (R : out E.Compiled_Rule) is
-   begin
-      R := (Selections => [others => <>],
-            Sel_Count  => 0,
-            Nodes      => [others => <>],
-            Node_Count => 0,
-            Root       => 0);
-   end Clear_Rule;
+    --  Reset an out rule without routing a whole Compiled_Rule through
+    --  an aggregate: a whole-rule transient would be ~Rule'Size on the
+    --  primary stack (3.6 MB with P3a programs; found by -fstack-usage
+    --  when yaml_smoke overflowed 8 MB). Counts only: every reader
+    --  gates on Sel_Count/Node_Count/Field_Count, and every append
+    --  fully initializes its slot (Open_Selection, Add_Node), so
+    --  stale array data is unreachable. Equivalent to Empty_Rule.
+    procedure Clear_Rule (R : out E.Compiled_Rule) is
+    begin
+       R.Sel_Count := 0;
+       R.Node_Count := 0;
+       R.Root := 0;
+    end Clear_Rule;
 
    procedure Copy_Key
      (L : in out Loader; Text : String; Loc : Natural)
@@ -463,6 +464,1041 @@ package IP renames Sigma_Verdict.IP;
    --  integers (EventID: 4728) become E_Int; quoted or non-numeric
    --  scalars become E_Text. Chains holding re/wildcard become
    --  E_Pattern so the core fails closed with Unsupported.
+   --------------------------------
+   --  Pattern compiler (P3a) --
+   --------------------------------
+   --  Thompson NFA construction over the bytecode the core VM
+   --  executes. Glob (with implicit-wildcard routing) and the spec
+   --  PCRE subset (literals, . ^$, * + ? {n,m}, classes with ranges
+   --  and negation, alternation, grouping) compile here; anything
+   --  outside fails loudly at load: malformed shapes are
+   --  Load_Bad_Value, well-formed but out-of-subset constructs
+   --  (backreferences, lookarounds, shorthand classes, \b et al)
+   --  are Load_Unsupported_Pattern with Detail pointing at the
+   --  offending construct. Over-budget programs are Load_Too_Long,
+   --  never truncated.
+   --  Recursion depth follows group nesting (real rules nest a
+   --  handful deep); depth beyond Max_Parse_Depth is refused as
+   --  Too_Long (stack capacity, same family as every capacity).
+
+   Max_Parse_Depth : constant := 256;
+
+   type Pat_Fail_Kind is
+     (Pat_Ok, Pat_Too_Long, Pat_Bad_Value, Pat_Unsupported, Pat_Internal);
+
+   Pattern_Error : exception;
+
+   --  Thompson fragment: entry PC (0 = no code emitted yet) plus
+   --  the head of the pending-target chain (0 = none). Chain links
+   --  live in the 2-byte operand fields of already-emitted
+   --  SPLIT/JMPs, so fragments cost two Naturals no matter how
+   --  wide the alternation nests. Patching a head of 0 is a no-op
+   --  (fall-through to whatever is emitted next).
+   type Frag is record
+      Start : Natural := 0;
+      Outs  : Natural := 0;
+   end record;
+
+   function Has_Wildcard (Text : String) return Boolean is
+      --  True iff Text holds an unescaped Sigma wildcard. Escape
+      --  rules per the rules specification: \*, \? and \\ are
+      --  literals; a lone backslash before anything else is itself.
+      I : Natural := Text'First;
+   begin
+      while I <= Text'Last loop
+         if Text (I) = '\'
+           and then I < Text'Last
+           and then Text (I + 1) in '*' | '?' | '\'
+         then
+            I := I + 2;
+         elsif Text (I) = '*' or else Text (I) = '?' then
+            return True;
+         else
+            I := I + 1;
+         end if;
+      end loop;
+      return False;
+   end Has_Wildcard;
+
+   procedure Compile_Pattern_Value
+     (Text    : String;
+      Is_Re   : Boolean;
+      Fold    : Boolean;
+      ML      : Boolean;
+      Dot_All : Boolean;
+      Anch_S  : Boolean;
+      Anch_E  : Boolean;
+      Prog    : out E.NFA_Program;
+      Fail    : out Pat_Fail_Kind;
+      Where   : out Natural)
+   is
+      C : E.NFA_Program :=
+        (Code         => [others => Character'Val (0)],
+         Length       => 0,
+         Fold         => Fold,
+         Multi_Line   => ML,
+         Anchor_Start => Anch_S,
+         Anchor_End   => Anch_E);
+
+      procedure Fail_Pattern (Kind : Pat_Fail_Kind; Pos : Natural) is
+      begin
+         Fail := Kind;
+         Where := (if Pos < Text'First then 1
+                elsif Pos > Text'Last then Text'Length
+                else Pos - Text'First + 1);
+         raise Pattern_Error;
+      end Fail_Pattern;
+
+      procedure Emit_Byte (B : Character) is
+      begin
+         if C.Length = Limits.Default_Pattern_Code then
+            Fail_Pattern (Pat_Too_Long, 0);
+         end if;
+         C.Length := C.Length + 1;
+         C.Code (C.Length) := B;
+      end Emit_Byte;
+
+      procedure Emit_U16 (V : Natural) is
+      begin
+         if V > 65535 then
+            --  Unaddressable jump: only absurd capacities reach it.
+            Fail_Pattern (Pat_Too_Long, 0);
+         end if;
+         Emit_Byte (Character'Val (V / 256));
+         Emit_Byte (Character'Val (V mod 256));
+      end Emit_U16;
+
+      function Fetch_U16 (Pos : Natural) return Natural is
+      begin
+         if Pos < 1 or else Pos + 1 > C.Length then
+            Fail_Pattern (Pat_Internal, 0);
+         end if;
+         return Character'Pos (C.Code (Pos)) * 256
+           + Character'Pos (C.Code (Pos + 1));
+      end Fetch_U16;
+
+      procedure Store_U16 (Pos : Natural; V : Natural) is
+      begin
+         if Pos < 1 or else Pos + 1 > C.Length then
+            Fail_Pattern (Pat_Internal, 0);
+         end if;
+         C.Code (Pos) := Character'Val (V / 256);
+         C.Code (Pos + 1) := Character'Val (V mod 256);
+      end Store_U16;
+
+      procedure Patch (Head : Natural; Target : Natural) is
+         P : Natural := Head;
+         N : Natural := 0;
+      begin
+         while P /= 0 loop
+            N := N + 1;
+            if N > Limits.Default_Pattern_Code + 1 then
+               Fail_Pattern (Pat_Internal, 0);
+            end if;
+            if Target > 65535 then
+               Fail_Pattern (Pat_Too_Long, 0);
+            end if;
+            declare
+               Next : constant Natural := Fetch_U16 (P);
+            begin
+               Store_U16 (P, Target);
+               P := Next;
+            end;
+         end loop;
+      end Patch;
+
+      procedure Emit_Lit (Ch : Character) is
+      begin
+         Emit_Byte (E.OC_Lit);
+         Emit_Byte ((if Fold then Fold_Char (Ch) else Ch));
+      end Emit_Lit;
+
+      --  Returns the field positions holding the two pending
+      --  targets (each a single-cell chain), plus the SPLIT pos.
+      procedure Emit_Split
+        (Pos : out Natural; F1, F2 : out Natural)
+      is
+      begin
+         Pos := C.Length + 1;
+         Emit_Byte (E.OC_Split);
+         F1 := C.Length + 1;
+         Emit_U16 (0);
+         F2 := C.Length + 1;
+         Emit_U16 (0);
+      end Emit_Split;
+
+      --  Returns the JMP pos; the single pending field holds 0.
+      procedure Emit_Jmp (Pos : out Natural) is
+      begin
+         Pos := C.Length + 1;
+         Emit_Byte (E.OC_Jmp);
+         Emit_U16 (0);
+      end Emit_Jmp;
+
+      function Jmp_Cell (Pos : Natural) return Natural is
+        (Pos + 1);
+
+      procedure Compile_Glob (Text : String; Start : out Natural) is
+         I : Natural := Text'First;
+      begin
+         Start := 0;
+         while I <= Text'Last loop
+            if Text (I) = '\'
+              and then I < Text'Last
+              and then Text (I + 1) in '*' | '?' | '\'
+            then
+               if Start = 0 then
+                  Start := C.Length + 1;
+               end if;
+               Emit_Lit (Text (I + 1));
+               I := I + 2;
+            elsif Text (I) = '\' then
+               if Start = 0 then
+                  Start := C.Length + 1;
+               end if;
+               Emit_Lit ('\');
+               I := I + 1;
+            elsif Text (I) = '*' then
+               --  Collapse runs: '**' matches exactly what '*' does.
+               while I + 1 <= Text'Last and then Text (I + 1) = '*' loop
+                  I := I + 1;
+               end loop;
+               declare
+                  S, F1, F2 : Natural;
+                  B         : Natural;
+                  J         : Natural;
+                  Join      : Natural;
+               begin
+                  Emit_Split (S, F1, F2);
+                  if Start = 0 then
+                     Start := S;
+                  end if;
+                  B := C.Length + 1;
+                  Emit_Byte (E.OC_Any_NL);
+                  Emit_Jmp (J);
+                  Join := C.Length + 1;
+                  Patch (F1, B);
+                  Patch (F2, Join);
+                  Patch (Jmp_Cell (J), S);
+               end;
+               I := I + 1;
+            elsif Text (I) = '?' then
+               if Start = 0 then
+                  Start := C.Length + 1;
+               end if;
+               Emit_Byte (E.OC_Any_NL);
+               I := I + 1;
+            else
+               if Start = 0 then
+                  Start := C.Length + 1;
+               end if;
+               Emit_Lit (Text (I));
+               I := I + 1;
+            end if;
+         end loop;
+      end Compile_Glob;
+
+      procedure Parse_Expr
+        (Text : String; Pos : in out Natural; F : out Frag;
+         Depth : Natural);
+      procedure Parse_Term
+        (Text : String; Pos : in out Natural; F : out Frag;
+         Depth : Natural);
+      procedure Parse_Factor
+        (Text : String; Pos : in out Natural; F : out Frag;
+         Depth : Natural);
+      procedure Parse_One_Atom
+        (Text : String; Pos : in out Natural; F : out Frag;
+         Is_Assert : out Boolean; Depth : Natural);
+      --  Forward declarations: expressions nest (groups), and
+      --  {n,m} recompiles a bare atom without its quantifier.
+
+      procedure Star_Of (A : Frag; R : out Frag) is
+         --  Exit edges stay pending: only Concat (or the final
+         --  patch) knows the continuation. Eager Join targets
+         --  would misfire when recompiled copies land between the
+         --  wrapper and its continuation (found via '{n,m}').
+         S, F1, F2 : Natural;
+      begin
+         Emit_Split (S, F1, F2);
+         if A.Start = 0 then
+            Store_U16 (F1, F2);
+            R := (Start => S, Outs => F1);
+         else
+            Patch (F1, A.Start);
+            Patch (A.Outs, S);
+            R := (Start => S, Outs => F2);
+         end if;
+      end Star_Of;
+
+      procedure Quest_Of (A : Frag; R : out Frag) is
+         S, F1, F2 : Natural;
+      begin
+         Emit_Split (S, F1, F2);
+         if A.Start = 0 then
+            Store_U16 (F1, F2);
+            R := (Start => S, Outs => F1);
+         else
+            Patch (F1, A.Start);
+            --  The atom's exits join the pending chain: the
+            --  continuation is not known yet.
+            Store_U16 (F2, A.Outs);
+            R := (Start => S, Outs => F2);
+         end if;
+      end Quest_Of;
+
+      procedure Plus_Of (A : Frag; R : out Frag) is
+         S, F1, F2 : Natural;
+      begin
+         Emit_Split (S, F1, F2);
+         if A.Start = 0 then
+            Store_U16 (F1, F2);
+            R := (Start => S, Outs => F1);
+         else
+            Patch (F1, A.Start);
+            Patch (A.Outs, S);
+            R := (Start => S, Outs => F2);
+         end if;
+      end Plus_Of;
+
+      procedure Concat (A, B : Frag; R : out Frag) is
+      begin
+         Patch (A.Outs, (if B.Start = 0 then C.Length + 1 else B.Start));
+         R := (Start => (if A.Start = 0 then B.Start else A.Start),
+                Outs  => B.Outs);
+      end Concat;
+
+      procedure Alt_Or (A, B : Frag; R : out Frag) is
+         --  Regex '|': an empty side means "or empty", i.e. the
+         --  other side made optional. Pending exits chain through
+         --  the join jump; nothing targets virtual positions.
+         S, F1, F2 : Natural;
+         J         : Natural;
+      begin
+         if A.Start = 0 and then B.Start = 0 then
+            R := (Start => 0, Outs => 0);
+            return;
+         elsif A.Start = 0 then
+            Quest_Of (B, R);
+            return;
+         elsif B.Start = 0 then
+            Quest_Of (A, R);
+            return;
+         end if;
+         Emit_Split (S, F1, F2);
+         Patch (F1, A.Start);
+         Emit_Jmp (J);
+         Patch (A.Outs, J);
+         Patch (F2, B.Start);
+         Store_U16 (Jmp_Cell (J), B.Outs);
+         R := (Start => S, Outs => Jmp_Cell (J));
+      end Alt_Or;
+
+      procedure Alt_Union (A, B : Frag; R : out Frag) is
+         --  Class ranges: an empty side is the identity, never an
+         --  optional. Only used for class ranges, which are never
+         --  empty, so the empty arms are defensive.
+         S, F1, F2 : Natural;
+         J         : Natural;
+      begin
+         if A.Start = 0 then
+            R := B;
+            return;
+         elsif B.Start = 0 then
+            R := A;
+            return;
+         end if;
+         Emit_Split (S, F1, F2);
+         Patch (F1, A.Start);
+         Emit_Jmp (J);
+         Patch (A.Outs, J);
+         Patch (F2, B.Start);
+         Store_U16 (Jmp_Cell (J), B.Outs);
+         R := (Start => S, Outs => Jmp_Cell (J));
+      end Alt_Union;
+
+      procedure Emit_Anchor (Op : Character; R : out Frag) is
+         S : Natural;
+         J : Natural;
+      begin
+         S := C.Length + 1;
+         Emit_Byte (Op);
+         Emit_Jmp (J);
+         R := (Start => S, Outs => Jmp_Cell (J));
+      end Emit_Anchor;
+
+      procedure Parse_Escape_Literal
+        (Text : String; Pos : in out Natural; Ch : out Character)
+      is
+         E : Character;
+      begin
+         --  Pos is on the backslash; Last is checked by callers.
+         E := Text (Pos + 1);
+         case E is
+            when '.' | '*' | '+' | '?' | '{' | '}' | '[' | ']'
+              | '(' | ')' | '|' | '^' | '$' | '\' =>
+               Ch := E;
+               Pos := Pos + 2;
+            when 'n' =>
+               Ch := ASCII.LF;
+               Pos := Pos + 2;
+            when 't' =>
+               Ch := ASCII.HT;
+               Pos := Pos + 2;
+            when 'r' =>
+               Ch := ASCII.CR;
+               Pos := Pos + 2;
+            when '0' =>
+               Ch := Character'Val (0);
+               Pos := Pos + 2;
+            when others =>
+               Fail_Pattern (Pat_Unsupported, Pos);
+         end case;
+      end Parse_Escape_Literal;
+
+      procedure Parse_Class
+        (Text : String; Pos : in out Natural; F : out Frag)
+      is
+         --  Ranges are collected first so negated multi-range
+         --  classes can compile to the ASCII gap ranges. A class
+         --  holds at most one range per consumed character, so the
+         --  table (sized by the text bound) cannot overflow.
+         type Range_Rec is record
+            Lo, Hi : Character := Character'Val (0);
+         end record;
+         Ranges : array (1 .. Limits.Default_Pattern_Length) of Range_Rec;
+         Count  : Natural := 0;
+         Neg    : Boolean := False;
+         First_Item : Boolean := True;
+
+         procedure Add_Range (Lo, Hi : Character) is
+         begin
+            if Lo > Hi then
+               Fail_Pattern (Pat_Bad_Value, Pos);
+            end if;
+            Count := Count + 1;
+            Ranges (Count) := (Lo => Lo, Hi => Hi);
+         end Add_Range;
+
+         procedure Sort_Ranges is
+            Tmp : Range_Rec;
+            J   : Natural;
+         begin
+            for I in 2 .. Count loop
+               Tmp := Ranges (I);
+               J := I;
+               while J > 1 and then Ranges (J - 1).Lo > Tmp.Lo loop
+                  Ranges (J) := Ranges (J - 1);
+                  J := J - 1;
+               end loop;
+               Ranges (J) := Tmp;
+            end loop;
+         end Sort_Ranges;
+
+         procedure Emit_Cls_Frag (Lo, Hi : Character; R : out Frag) is
+            S : Natural;
+            J : Natural;
+         begin
+            S := C.Length + 1;
+            Emit_Byte (E.OC_Cls);
+            Emit_Byte (Lo);
+            Emit_Byte (Hi);
+            Emit_Jmp (J);
+            R := (Start => S, Outs => Jmp_Cell (J));
+         end Emit_Cls_Frag;
+
+         procedure Emit_Never (R : out Frag) is
+            --  Matches nothing: both split edges die past the end.
+            S, F1, F2 : Natural;
+         begin
+            Emit_Split (S, F1, F2);
+            Store_U16 (F1, F2);
+            Store_U16 (F2, 0);
+            R := (Start => S, Outs => F1);
+         end Emit_Never;
+
+      begin
+         --  Pos is on '['.
+         Pos := Pos + 1;
+         if Pos <= Text'Last and then Text (Pos) = '^' then
+            Neg := True;
+            Pos := Pos + 1;
+         end if;
+         while Pos <= Text'Last loop
+            exit when Text (Pos) = ']' and then not First_Item;
+            --  A ']' in first position is a literal member (PCRE):
+            --  '[]a]' reads as ']' plus the class '[a]'.
+            if First_Item and then Text (Pos) = ']' then
+               Add_Range (']', ']');
+               Pos := Pos + 1;
+               First_Item := False;
+            else
+            declare
+               Lo : Character;
+            begin
+               if Text (Pos) = '\' then
+                  if Pos = Text'Last then
+                     Fail_Pattern (Pat_Bad_Value, Pos);
+                  end if;
+                  Parse_Escape_Literal (Text, Pos, Lo);
+               else
+                  Lo := Text (Pos);
+                  Pos := Pos + 1;
+               end if;
+               if Pos + 1 <= Text'Last
+                 and then Text (Pos) = '-'
+                 and then Text (Pos + 1) /= ']'
+               then
+                  declare
+                     Hi : Character;
+                  begin
+                     Pos := Pos + 1;
+                     if Text (Pos) = '\' then
+                        if Pos = Text'Last then
+                           Fail_Pattern (Pat_Bad_Value, Pos);
+                        end if;
+                        Parse_Escape_Literal (Text, Pos, Hi);
+                     else
+                        Hi := Text (Pos);
+                        Pos := Pos + 1;
+                     end if;
+                     Add_Range (Lo, Hi);
+                  end;
+               else
+                  Add_Range (Lo, Lo);
+               end if;
+               First_Item := False;
+            end;
+            end if;
+         end loop;
+         if Pos > Text'Last then
+            Fail_Pattern (Pat_Bad_Value, Text'Last);
+         end if;
+         Pos := Pos + 1;
+         if Count = 0 then
+            --  Unreachable: the loop always banks at least the
+            --  ']'-first literal before running out, so an empty
+            --  class means the ']' above closed nothing... kept as
+            --  defence in depth (PCRE rejects the empty class).
+            Fail_Pattern (Pat_Bad_Value, Pos);
+         end if;
+         if not Neg then
+            declare
+               Acc    : Frag := (Start => 0, Outs => 0);
+               R      : Frag;
+               Merged : Frag;
+            begin
+               for I in 1 .. Count loop
+                  Emit_Cls_Frag (Ranges (I).Lo, Ranges (I).Hi, R);
+                  Alt_Union (Acc, R, Merged);
+                  Acc := Merged;
+               end loop;
+               F := Acc;
+            end;
+         elsif Count = 1 then
+            declare
+               S : Natural;
+               J : Natural;
+            begin
+               S := C.Length + 1;
+               Emit_Byte (E.OC_NCls);
+               Emit_Byte (Ranges (1).Lo);
+               Emit_Byte (Ranges (1).Hi);
+               Emit_Jmp (J);
+               F := (Start => S, Outs => Jmp_Cell (J));
+            end;
+         else
+            --  Negated union: compile the ASCII gaps between the
+            --  sorted ranges. LF matches exactly when it falls in a
+            --  gap, like every other character.
+            declare
+               Acc     : Frag := (Start => 0, Outs => 0);
+               Covered : Integer := -1;
+               R       : Frag;
+               Merged  : Frag;
+            begin
+               Sort_Ranges;
+               for I in 1 .. Count loop
+                  declare
+                     Lo : constant Integer :=
+                       Character'Pos (Ranges (I).Lo);
+                     Hi : constant Integer :=
+                       Character'Pos (Ranges (I).Hi);
+                  begin
+                     if Lo > Covered + 1 then
+                        Emit_Cls_Frag
+                          (Character'Val (Covered + 1),
+                           Character'Val (Lo - 1), R);
+                        Alt_Union (Acc, R, Merged);
+                        Acc := Merged;
+                     end if;
+                     if Hi > Covered then
+                        Covered := Hi;
+                     end if;
+                  end;
+               end loop;
+               if Covered < 255 then
+                  Emit_Cls_Frag
+                    (Character'Val (Covered + 1),
+                     Character'Val (255), R);
+                  Alt_Union (Acc, R, Merged);
+                  Acc := Merged;
+               end if;
+               if Acc.Start = 0 then
+                  Emit_Never (Acc);
+               end if;
+               F := Acc;
+            end;
+         end if;
+      end Parse_Class;
+
+      procedure Parse_One_Atom
+        (Text : String; Pos : in out Natural; F : out Frag;
+         Is_Assert : out Boolean; Depth : Natural)
+      is
+         S : Natural;
+         J : Natural;
+      begin
+         Is_Assert := False;
+         if Pos > Text'Last then
+            Fail_Pattern (Pat_Internal, Pos);
+         end if;
+         case Text (Pos) is
+            when '(' =>
+               Pos := Pos + 1;
+               Parse_Expr (Text, Pos, F, Depth + 1);
+               if Pos > Text'Last or else Text (Pos) /= ')' then
+                  Fail_Pattern (Pat_Bad_Value, Pos);
+               end if;
+               Pos := Pos + 1;
+            when '[' =>
+               Parse_Class (Text, Pos, F);
+            when '\' =>
+               if Pos = Text'Last then
+                  Fail_Pattern (Pat_Bad_Value, Pos);
+               end if;
+               declare
+                  Ch : Character;
+               begin
+                  Parse_Escape_Literal (Text, Pos, Ch);
+                  S := C.Length + 1;
+                  Emit_Lit (Ch);
+                  Emit_Jmp (J);
+                  F := (Start => S, Outs => Jmp_Cell (J));
+               end;
+            when '.' =>
+               S := C.Length + 1;
+               Emit_Byte ((if Dot_All then E.OC_Any_NL else E.OC_Any));
+               Emit_Jmp (J);
+               F := (Start => S, Outs => Jmp_Cell (J));
+               Pos := Pos + 1;
+            when '^' =>
+               Emit_Anchor (E.OC_Begin, F);
+               Is_Assert := True;
+               Pos := Pos + 1;
+            when '$' =>
+               Emit_Anchor (E.OC_End, F);
+               Is_Assert := True;
+               Pos := Pos + 1;
+            when '*' | '+' | '?' =>
+               --  A quantifier with no operand is malformed
+               --  (PCRE errors the same way).
+               Fail_Pattern (Pat_Bad_Value, Pos);
+            when '{' | '|' | ')' =>
+               --  '{' opens no valid quantifier here (no preceding
+               --  atom), so it is a literal; '|' and ')' never
+               --  reach the atom parser from well-formed callers,
+               --  and read literally if they do.
+               S := C.Length + 1;
+               Emit_Lit (Text (Pos));
+               Emit_Jmp (J);
+               F := (Start => S, Outs => Jmp_Cell (J));
+               Pos := Pos + 1;
+            when others =>
+               S := C.Length + 1;
+               Emit_Lit (Text (Pos));
+               Emit_Jmp (J);
+               F := (Start => S, Outs => Jmp_Cell (J));
+               Pos := Pos + 1;
+         end case;
+      end Parse_One_Atom;
+
+      procedure Parse_Brace
+        (Text : String; Pos : in out Natural; N : out Natural;
+         Has_M : out Boolean; Open : out Boolean; M : out Natural;
+         Valid : out Boolean)
+      is
+         --  Lookahead for '{n}', '{n,}', '{n,m}' at Pos (on '{').
+         --  Never consumes on invalid forms: the '{' stays a
+         --  literal for the next factor. Counts clamp at a million;
+         --  the code budget aborts long before that matters.
+         --  '{n,}' (Open) means n or more; n > m is not a valid
+         --  form and falls back to a literal '{' (PCRE-lenient).
+         J : Natural;
+      begin
+         Valid := False;
+         N := 0;
+         Has_M := False;
+         Open := False;
+         M := 0;
+         J := Pos + 1;
+         if J > Text'Last or else Text (J) not in '0' .. '9' then
+            return;
+         end if;
+         while J <= Text'Last and then Text (J) in '0' .. '9' loop
+            if N <= 999_999 then
+               N := N * 10 + (Character'Pos (Text (J)) - Character'Pos ('0'));
+            end if;
+            J := J + 1;
+         end loop;
+         if J <= Text'Last and then Text (J) = ',' then
+            Has_M := True;
+            J := J + 1;
+            if J > Text'Last or else Text (J) not in '0' .. '9' then
+               Open := True;
+            else
+               while J <= Text'Last and then Text (J) in '0' .. '9' loop
+                  if M <= 999_999 then
+                     M := M * 10
+                       + (Character'Pos (Text (J)) - Character'Pos ('0'));
+                  end if;
+                  J := J + 1;
+               end loop;
+            end if;
+         end if;
+         if J <= Text'Last and then Text (J) = '}'
+           and then (not Has_M or else Open or else M >= N)
+         then
+            Valid := True;
+            Pos := J + 1;
+         end if;
+      end Parse_Brace;
+
+      procedure Parse_Factor
+        (Text : String; Pos : in out Natural; F : out Frag;
+         Depth : Natural)
+      is
+         Atom_First : Natural;
+         Atom_Len_Before : Natural;
+         Atom_Last  : Natural;
+         A          : Frag;
+         Is_Assert  : Boolean;
+         Quantified : Boolean := False;
+         R          : Frag;
+      begin
+         Atom_First := Pos;
+         Atom_Len_Before := C.Length;
+         Parse_One_Atom (Text, Pos, A, Is_Assert, Depth);
+         Atom_Last := Pos - 1;
+         F := A;
+         if Pos <= Text'Last
+           and then Text (Pos) in '*' | '+' | '?'
+         then
+            if Is_Assert then
+               Fail_Pattern (Pat_Bad_Value, Pos);
+            end if;
+            if Text (Pos) = '*' then
+               Star_Of (A, R);
+            elsif Text (Pos) = '+' then
+               Plus_Of (A, R);
+            else
+               Quest_Of (A, R);
+            end if;
+            F := R;
+            Quantified := True;
+            Pos := Pos + 1;
+            if Pos <= Text'Last and then Text (Pos) in '*' | '+' | '?' then
+               --  Lazy/possessive ('*?', '*+') are outside the
+               --  spec subset; stacked quantifiers are malformed.
+               Fail_Pattern (Pat_Bad_Value, Pos);
+            end if;
+         end if;
+         if Pos <= Text'Last and then Text (Pos) = '{' then
+            declare
+               N     : Natural;
+               Has_M : Boolean;
+               Open  : Boolean;
+               M     : Natural;
+               Valid : Boolean;
+            begin
+               Parse_Brace (Text, Pos, N, Has_M, Open, M, Valid);
+                if Valid then
+                  if Is_Assert or else Quantified then
+                     Fail_Pattern (Pat_Bad_Value, Pos);
+                  end if;
+                  if A.Start = 0 then
+                     F := (Start => 0, Outs => 0);
+                  else
+                     --  The atom above already emitted one copy;
+                     --  truncate it and re-emit exactly the copies
+                     --  needed. Truncation is sound: nothing else
+                     --  can reference the discarded tail (pending
+                     --  joins into it point at its first byte, where
+                     --  the first copy lands anyway).
+                     C.Length := Atom_Len_Before;
+                     declare
+                        Acc     : Frag := (Start => 0, Outs => 0);
+                        Copy    : Frag;
+                        Starred : Frag;
+                        Quested : Frag;
+                        Dummy   : Boolean;
+                        Tmp     : Frag;
+                        P_Saved : Natural;
+                     begin
+                        --  Mandatory copies.
+                        for K in 1 .. N loop
+                           P_Saved := Pos;
+                           Pos := Atom_First;
+                           Parse_One_Atom
+                             (Text, Pos, Copy, Dummy, Depth);
+                           if Pos /= Atom_Last + 1 then
+                              Fail_Pattern (Pat_Internal, Pos);
+                           end if;
+                           Pos := P_Saved;
+                           Concat (Acc, Copy, Tmp);
+                           Acc := Tmp;
+                        end loop;
+                        --  Open tail ('{n,}') or optional tail.
+                        if Open then
+                           P_Saved := Pos;
+                           Pos := Atom_First;
+                           Parse_One_Atom
+                             (Text, Pos, Copy, Dummy, Depth);
+                           if Pos /= Atom_Last + 1 then
+                              Fail_Pattern (Pat_Internal, Pos);
+                           end if;
+                           Pos := P_Saved;
+                           Star_Of (Copy, Starred);
+                           Concat (Acc, Starred, Tmp);
+                           Acc := Tmp;
+                        else
+                           declare
+                              Extra : constant Natural :=
+                                (if Has_M then M - N else 0);
+                           begin
+                              for K in 1 .. Extra loop
+                                 P_Saved := Pos;
+                                 Pos := Atom_First;
+                                 Parse_One_Atom
+                                   (Text, Pos, Copy, Dummy, Depth);
+                                 if Pos /= Atom_Last + 1 then
+                                    Fail_Pattern (Pat_Internal, Pos);
+                                 end if;
+                                 Pos := P_Saved;
+                                 Quest_Of (Copy, Quested);
+                                 Concat (Acc, Quested, Tmp);
+                                 Acc := Tmp;
+                              end loop;
+                           end;
+                        end if;
+                        F := Acc;
+                     end;
+                  end if;
+               end if;
+            end;
+         end if;
+      end Parse_Factor;
+
+      procedure Parse_Term
+        (Text : String; Pos : in out Natural; F : out Frag;
+         Depth : Natural)
+      is
+         Acc : Frag := (Start => 0, Outs => 0);
+         G   : Frag;
+         Tmp : Frag;
+      begin
+         while Pos <= Text'Last
+           and then Text (Pos) /= ')'
+           and then Text (Pos) /= '|'
+         loop
+            Parse_Factor (Text, Pos, G, Depth);
+            Concat (Acc, G, Tmp);
+            Acc := Tmp;
+         end loop;
+         F := Acc;
+      end Parse_Term;
+
+      procedure Parse_Expr
+        (Text : String; Pos : in out Natural; F : out Frag;
+         Depth : Natural)
+      is
+         Acc : Frag;
+         G   : Frag;
+         Tmp : Frag;
+      begin
+         if Depth > Max_Parse_Depth then
+            Fail_Pattern (Pat_Too_Long, Pos);
+         end if;
+         Parse_Term (Text, Pos, Acc, Depth);
+         while Pos <= Text'Last and then Text (Pos) = '|' loop
+            Pos := Pos + 1;
+            Parse_Term (Text, Pos, G, Depth);
+            Alt_Or (Acc, G, Tmp);
+            Acc := Tmp;
+         end loop;
+         F := Acc;
+      end Parse_Expr;
+
+   begin
+      Fail := Pat_Ok;
+      Where := 0;
+      Prog := (others => <>);
+      if Text'Length > Limits.Default_Pattern_Length then
+         Fail := Pat_Too_Long;
+         return;
+      end if;
+      declare
+         Pos : Natural := Text'First;
+         Top : Frag;
+         Entry_Jmp : Natural;
+      begin
+         --  Position 1 is the VM entry by convention, but the
+         --  logical entry only emerges at the end (leading
+         --  quantifiers and alternations emit code first), so
+         --  reserve an entry jump up front and patch it last.
+         Emit_Jmp (Entry_Jmp);
+         if Is_Re then
+            Parse_Expr (Text, Pos, Top, 0);
+            while Pos <= Text'Last loop
+               --  Only ')' can stop a top-level expression; it
+               --  reads literally (PCRE).
+               if Text (Pos) /= ')' then
+                  Fail_Pattern (Pat_Internal, Pos);
+               end if;
+               declare
+                  Lit  : Frag;
+                  Cont : Frag;
+                  Tmp  : Frag;
+                  S, J : Natural;
+               begin
+                  S := C.Length + 1;
+                  Emit_Lit (')');
+                  Emit_Jmp (J);
+                  Lit := (Start => S, Outs => Jmp_Cell (J));
+                  Concat (Top, Lit, Tmp);
+                  Pos := Pos + 1;
+                  Parse_Expr (Text, Pos, Cont, 0);
+                  Concat (Tmp, Cont, Top);
+               end;
+            end loop;
+         else
+            declare
+               Start : Natural;
+            begin
+               Compile_Glob (Text, Start);
+               Top := (Start => Start, Outs => 0);
+            end;
+         end if;
+         declare
+            Match_Pos : Natural;
+         begin
+            Match_Pos := C.Length + 1;
+            Emit_Byte (E.OC_Match);
+            Patch (Top.Outs, Match_Pos);
+            Patch (Jmp_Cell (Entry_Jmp),
+                   (if Top.Start = 0 then Match_Pos else Top.Start));
+         end;
+         Prog :=
+           (Code         => C.Code,
+            Length       => C.Length,
+            Fold         => Fold,
+            Multi_Line   => ML,
+            Anchor_Start => Anch_S,
+            Anchor_End   => Anch_E);
+      end;
+   exception
+      when Pattern_Error =>
+         Prog := (others => <>);
+   end Compile_Pattern_Value;
+
+   function Unescape_Value (Text : String) return String is
+      --  Sigma backslash escapes (rules specification): \*, \? and
+      --  \\ collapse to their second character; a lone backslash
+      --  stays itself. Applied to literal (non-pattern) values so
+      --  'a\*b' denotes a*b; pattern compilation handles escapes
+      --  itself and always sees the raw text.
+      Buf : String (1 .. Text'Length + 1);
+      N   : Natural := 0;
+      I   : Natural := Text'First;
+   begin
+      while I <= Text'Last loop
+         if Text (I) = '\'
+           and then I < Text'Last
+           and then Text (I + 1) in '*' | '?' | '\'
+         then
+            N := N + 1;
+            Buf (N) := Text (I + 1);
+            I := I + 2;
+         else
+            N := N + 1;
+            Buf (N) := Text (I);
+            I := I + 1;
+         end if;
+      end loop;
+      return Buf (1 .. N);
+   end Unescape_Value;
+
+   function Is_Integer_Text (Text : String) return Boolean is
+      --  Probe mirroring Add_List_Item's classification: a plain
+      --  scalar is an integer iff Integer'Value accepts it.
+   begin
+      return (Integer'Value (Text) = 0) or else True;
+   exception
+      when Constraint_Error =>
+         return False;
+   end Is_Integer_Text;
+
+   procedure Pattern_Flags
+     (Mods   : E.Modifier_Set;
+      Is_Re  : Boolean;
+      Fold   : out Boolean;
+      ML     : out Boolean;
+      Dot    : out Boolean;
+      Anch_S : out Boolean;
+      Anch_E : out Boolean)
+   is
+      Has_Anchor : constant Boolean :=
+        E.Has_Modifier (Mods, E.Mod_Contains)
+        or else E.Has_Modifier (Mods, E.Mod_Startswith)
+        or else E.Has_Modifier (Mods, E.Mod_Endswith);
+   begin
+      --  Case: Sigma matches case-insensitively unless `cased`;
+      --  `re` is case-sensitive unless `i`. The chain gate already
+      --  refused `cased` + `i`.
+      Fold := (Is_Re and then E.Has_Modifier (Mods, E.Mod_Re_I))
+        or else ((not Is_Re)
+          and then not E.Has_Modifier (Mods, E.Mod_Cased));
+      ML := Is_Re and then E.Has_Modifier (Mods, E.Mod_Re_M);
+      Dot := (not Is_Re) or else E.Has_Modifier (Mods, E.Mod_Re_S);
+      if not Has_Anchor then
+         --  Bare glob anchors both ends; bare `re` searches
+         --  (explicit ^$ still assert inside the pattern).
+         Anch_S := not Is_Re;
+         Anch_E := not Is_Re;
+      else
+         Anch_S := E.Has_Modifier (Mods, E.Mod_Startswith);
+         Anch_E := E.Has_Modifier (Mods, E.Mod_Endswith);
+      end if;
+   end Pattern_Flags;
+
+   procedure Map_Pattern_Fail
+     (L : in out Loader; Kind : Pat_Fail_Kind; Loc : Natural)
+   is
+   begin
+      case Kind is
+         when Pat_Ok =>
+            null;
+         when Pat_Too_Long =>
+            Fail (L, Load_Too_Long, Loc);
+         when Pat_Bad_Value =>
+            Fail (L, Load_Bad_Value, Loc);
+         when Pat_Unsupported =>
+            Fail (L, Load_Unsupported_Pattern, Loc);
+         when Pat_Internal =>
+            Fail (L, Load_Internal, Loc);
+      end case;
+   end Map_Pattern_Fail;
+
    procedure Add_Scalar_Field
      (L       : in out Loader;
       Sel     : Natural;
@@ -516,6 +1552,12 @@ package IP renames Sigma_Verdict.IP;
             Wants_Pattern := True;
          end if;
       end loop;
+      if not Wants_Pattern and then Has_Wildcard (Text) then
+         --  Implicit wildcards: an unescaped '*' or '?' in a plain
+         --  value already means wildcard in Sigma, so the value
+         --  routes to the pattern path even without an `re` token.
+         Wants_Pattern := True;
+      end if;
       VT := E.View_Token (Mods);
       CT := E.Comparison_Of (Mods);
       Has_CIDR := E.Has_Modifier (Mods, E.Mod_CIDR);
@@ -567,13 +1609,40 @@ package IP renames Sigma_Verdict.IP;
                 Views => (others => <>));
       if Wants_Pattern then
          declare
-            P : constant E.Pattern_Result := E.To_Pattern (Text);
+            Is_Re                    : constant Boolean :=
+              E.Has_Re_Modifier (Mods);
+            P                        : E.Pattern_Result;
+            Prog                     : E.NFA_Program;
+            Kind                     : Pat_Fail_Kind;
+            Where                    : Natural;
+            Fold, ML, Dot            : Boolean;
+            Anch_S, Anch_E           : Boolean;
          begin
+            if Is_Re and then Is_Plain
+              and then Is_Integer_Text (Text)
+            then
+               --  `re` is a string modifier (spec appendix); a YAML
+               --  integer under it is a type error, like a view over
+               --  an integer (Load_Bad_Value).
+               Fail (L, Load_Bad_Value, Loc);
+               return;
+            end if;
+            P := E.To_Pattern (Text);
             if not P.Ok then
                Fail (L, Load_Too_Long, Loc);
                return;
             end if;
-            F.Expected := (Kind => E.E_Pattern, Pattern => P.Value);
+            Pattern_Flags
+              (Mods, Is_Re, Fold, ML, Dot, Anch_S, Anch_E);
+            Compile_Pattern_Value
+              (Text, Is_Re, Fold, ML, Dot, Anch_S, Anch_E,
+               Prog, Kind, Where);
+            if Kind /= Pat_Ok then
+               Map_Pattern_Fail (L, Kind, Loc);
+               return;
+            end if;
+            F.Expected :=
+              (Kind => E.E_Pattern, Pattern => P.Value, Prog => Prog);
          end;
       elsif Is_Plain then
          if VT /= E.Mod_None then
@@ -589,7 +1658,8 @@ package IP renames Sigma_Verdict.IP;
          exception
             when Constraint_Error =>
                declare
-                  V : constant E.Value_Result := E.To_Value_Text (Text);
+                  V : constant E.Value_Result :=
+                    E.To_Value_Text (Unescape_Value (Text));
                begin
                   if not V.Ok then
                      Fail (L, Load_Too_Long, Loc);
@@ -600,7 +1670,8 @@ package IP renames Sigma_Verdict.IP;
          end;
       else
          declare
-            V : constant E.Value_Result := E.To_Value_Text (Text);
+            V : constant E.Value_Result :=
+              E.To_Value_Text (Unescape_Value (Text));
          begin
             if not V.Ok then
                Fail (L, Load_Too_Long, Loc);
@@ -610,17 +1681,19 @@ package IP renames Sigma_Verdict.IP;
          end;
       end if;
       if VT /= E.Mod_None and then F.Expected.Kind = E.E_Text then
-         --  Patterns (re/wildcard) keep E_Pattern and fail closed in
-         --  the core; only text values get derived views.
+         --  Only text values get derived views; patterns carry
+         --  their program in Expected and views never ride with
+         --  them (the chain gate refuses the mix at match time).
          if VT = E.Mod_Base64Offset then
-            Derive_Offset (L, Text, Loc, F.Views.Offset, Fatal);
+            Derive_Offset (L, Unescape_Value (Text), Loc,
+                             F.Views.Offset, Fatal);
             if Fatal then
                return;
             end if;
             F.Views.Has_Offset := True;
             F.Views.Count := 1;
          else
-            Derive_Single (L, VT, Text, Loc, VW, Fatal);
+            Derive_Single (L, VT, Unescape_Value (Text), Loc, VW, Fatal);
             if Fatal then
                return;
             end if;
@@ -674,6 +1747,20 @@ package IP renames Sigma_Verdict.IP;
          F.List_Has_Txt := True;
       end;
    end Add_List_Item;
+
+   function List_Has_Wildcard (F : Frame) return Boolean is
+      --  True iff any text item carries an unescaped Sigma
+      --  wildcard (implicit-wildcard routing for lists).
+   begin
+      for I in 1 .. F.List_Count loop
+         if Has_Wildcard
+           (F.List_Items (I).Data (1 .. F.List_Items (I).Length))
+         then
+            return True;
+         end if;
+      end loop;
+      return False;
+   end List_Has_Wildcard;
 
    procedure Close_List
      (L : in out Loader; Idx : Natural; Loc : Natural) is
@@ -730,7 +1817,57 @@ package IP renames Sigma_Verdict.IP;
          Fail (L, Load_Bad_Value, Loc);
          return;
       end if;
-      if F.List_Has_Int then
+      if E.Has_Re_Modifier (Mods) or else List_Has_Wildcard (F) then
+         --  Pattern list: every text item compiles to its own
+         --  program (non-wildcard items compile as literals, so a
+         --  mixed glob/plain list stays uniformly E_Pattern_List).
+         if F.List_Has_Int then
+            --  `re`/patterns over integers are a type error
+            --  (string semantics); mixed int/text pattern lists
+            --  are refused like every other mixed list.
+            Fail (L, Load_Bad_Value, Loc);
+            return;
+         end if;
+         declare
+            Is_Re         : constant Boolean :=
+              E.Has_Re_Modifier (Mods);
+            Fold, ML, Dot : Boolean;
+            Anch_S, Anch_E : Boolean;
+            Kind          : Pat_Fail_Kind;
+            Where         : Natural;
+         begin
+            Pattern_Flags (Mods, Is_Re, Fold, ML, Dot, Anch_S, Anch_E);
+            FC := (Field => Field, Modifiers => Mods,
+                   Expected => (Kind      => E.E_Pattern_List,
+                                Pat_Items => [others => (Length => 0,
+                                                        Data => [others => ' '])],
+                                Pat_Progs => [others => (others => <>)],
+                                Pat_Count => 0),
+                   Views => (others => <>));
+            FC.Expected.Pat_Count := F.List_Count;
+            for I in 1 .. F.List_Count loop
+               declare
+                  Item : constant String :=
+                    F.List_Items (I).Data (1 .. F.List_Items (I).Length);
+                  P    : E.Pattern_Result;
+               begin
+                  P := E.To_Pattern (Item);
+                  if not P.Ok then
+                     Fail (L, Load_Too_Long, Loc);
+                     return;
+                  end if;
+                  FC.Expected.Pat_Items (I) := P.Value;
+                  Compile_Pattern_Value
+                    (Item, Is_Re, Fold, ML, Dot, Anch_S, Anch_E,
+                     FC.Expected.Pat_Progs (I), Kind, Where);
+                  if Kind /= Pat_Ok then
+                     Map_Pattern_Fail (L, Kind, Loc);
+                     return;
+                  end if;
+               end;
+            end loop;
+         end;
+      elsif F.List_Has_Int then
          FC := (Field => Field, Modifiers => Mods,
                 Expected => (Kind => E.E_Int_List,
                              Ints => [others => 0],
@@ -766,10 +1903,16 @@ package IP renames Sigma_Verdict.IP;
                                (Length => 0, Data => [others => ' '])],
                              Count => 0),
                 Views => (others => <>));
-         FC.Expected.Count := F.List_Count;
-         for I in 1 .. F.List_Count loop
-            FC.Expected.Items (I) := F.List_Items (I);
-         end loop;
+          FC.Expected.Count := F.List_Count;
+          for I in 1 .. F.List_Count loop
+             declare
+                Raw : constant String :=
+                  F.List_Items (I).Data (1 .. F.List_Items (I).Length);
+             begin
+                FC.Expected.Items (I) :=
+                  E.To_Value_Text (Unescape_Value (Raw)).Value;
+             end;
+          end loop;
          if VT /= E.Mod_None then
             if VT = E.Mod_Base64Offset then
                --  One value fans into three alternatives; a list of
@@ -779,14 +1922,17 @@ package IP renames Sigma_Verdict.IP;
                return;
             end if;
             for I in 1 .. F.List_Count loop
-               Derive_Single
-                 (L, VT,
-                  F.List_Items (I).Data (1 .. F.List_Items (I).Length),
-                  Loc, VW, Fatal);
-               if Fatal then
-                  return;
-               end if;
-               FC.Views.Items (I) := VW;
+               declare
+                  Raw : constant String :=
+                    F.List_Items (I).Data (1 .. F.List_Items (I).Length);
+               begin
+                  Derive_Single
+                    (L, VT, Unescape_Value (Raw), Loc, VW, Fatal);
+                  if Fatal then
+                     return;
+                  end if;
+                  FC.Views.Items (I) := VW;
+               end;
             end loop;
             FC.Views.Count := F.List_Count;
          end if;

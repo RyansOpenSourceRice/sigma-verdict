@@ -1,0 +1,9 @@
+title: Implicit wildcard match test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4728
+    CommandLine: 'who*adm?n'
+  condition: selection

@@ -1,0 +1,11 @@
+title: Regex list conjunction test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4728
+    CommandLine|re|all:
+      - '^a'
+      - 'b$'
+  condition: selection

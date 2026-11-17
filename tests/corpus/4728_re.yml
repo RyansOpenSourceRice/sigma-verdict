@@ -1,0 +1,9 @@
+title: Regex class and counted match test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4728
+    CommandLine|re: '^[a-z]+[0-9]{2}$'
+  condition: selection

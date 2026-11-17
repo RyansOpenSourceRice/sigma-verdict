@@ -1,0 +1,9 @@
+title: Cased wildcard match test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4728
+    CommandLine|cased: 'Who*'
+  condition: selection

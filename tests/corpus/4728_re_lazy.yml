@@ -1,0 +1,9 @@
+title: Lazy quantifier rejection test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4728
+    CommandLine|re: 'a*?'
+  condition: selection

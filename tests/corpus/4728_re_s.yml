@@ -1,0 +1,9 @@
+title: Dot-matches-newline regex match test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4728
+    CommandLine|re|s: 'a.*b'
+  condition: selection
