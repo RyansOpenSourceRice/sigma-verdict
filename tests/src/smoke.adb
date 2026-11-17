@@ -1,9 +1,12 @@
 with Sigma_Verdict.Defaults;
+with Sigma_Verdict.IP;
 
 --  Smoke test: EventID 4728 + CommandLine contains "whoami".
 procedure Smoke is
 
    use Sigma_Verdict.Defaults.Engine;
+
+   package IP renames Sigma_Verdict.IP;
 
    Rule  : Compiled_Rule;
    Event : Event_Record;
@@ -515,4 +518,323 @@ begin
    R := Evaluate (Rule, Event);
    Check (R.Error = Error_Unsupported_Modifier and then not R.Matched,
           "offset on list unsupported");
+
+   --  ---- P2: comparisons + CIDR ----
+
+   Rule.Selections (1).Field_Count := 2;
+   Rule.Selections (1).Fields (1) :=
+     (Field     => To_Field_Name ("EventID").Value,
+      Modifiers => (Count => 1, Items => [1 => Mod_GT,
+                                          others => Mod_None]),
+      Expected  => (Kind => E_Int, Int_Value => 4727),
+      Views     => (others => <>));
+   Rule.Selections (1).Fields (2) :=
+     (Field     => To_Field_Name ("CommandLine").Value,
+      Modifiers => (Count => 1, Items => [1 => Mod_Contains,
+                                          others => Mod_None]),
+      Expected  => (Kind   => E_Text,
+                    Single => To_Value_Text ("whoami").Value),
+      Views     => (others => <>));
+   Event.Count := 2;
+   Event.Fields (1).Value := (Kind => V_Int, Int_Value => 4728);
+   Event.Fields (2).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("run whoami").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "gt match");
+   Event.Fields (1).Value := (Kind => V_Int, Int_Value => 4727);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched, "gt equal no");
+   Event.Fields (1).Value := (Kind => V_Int, Int_Value => 4726);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched, "gt below no");
+
+   --  The other three operators, one polarity each.
+   Rule.Selections (1).Fields (1).Modifiers :=
+     (Count => 1, Items => [1 => Mod_GTE, others => Mod_None]);
+   Event.Fields (1).Value := (Kind => V_Int, Int_Value => 4727);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "gte equal match");
+   Rule.Selections (1).Fields (1).Modifiers :=
+     (Count => 1, Items => [1 => Mod_LT, others => Mod_None]);
+   Rule.Selections (1).Fields (1).Expected :=
+     (Kind => E_Int, Int_Value => -5);
+   Event.Fields (1).Value := (Kind => V_Int, Int_Value => -10);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "lt negative match");
+   Event.Fields (1).Value := (Kind => V_Int, Int_Value => 0);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched, "lt above no");
+   Rule.Selections (1).Fields (1).Modifiers :=
+     (Count => 1, Items => [1 => Mod_LTE, others => Mod_None]);
+   Event.Fields (1).Value := (Kind => V_Int, Int_Value => -5);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "lte equal match");
+
+   --  Integer edges: extremes compare without wrapping.
+   Rule.Selections (1).Fields (1).Modifiers :=
+     (Count => 1, Items => [1 => Mod_GTE, others => Mod_None]);
+   Rule.Selections (1).Fields (1).Expected :=
+     (Kind => E_Int, Int_Value => Integer'Last);
+   Event.Fields (1).Value := (Kind => V_Int, Int_Value => Integer'Last);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "gte last match");
+   Rule.Selections (1).Fields (1).Modifiers :=
+     (Count => 1, Items => [1 => Mod_GT, others => Mod_None]);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched, "gt last no");
+
+   --  Lists: OR by default, AND with all. Type mismatch stays a
+   --  clean non-match even under operators.
+   Rule.Selections (1).Fields (1) :=
+     (Field     => To_Field_Name ("EventID").Value,
+      Modifiers => (Count => 1, Items => [1 => Mod_GT,
+                                          others => Mod_None]),
+      Expected  => (Kind      => E_Int_List,
+                    Ints      => [4727, 4729, others => 0],
+                    Int_Count => 2),
+      Views     => (others => <>));
+   Event.Fields (1).Value := (Kind => V_Int, Int_Value => 4728);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "gt list or match");
+   Event.Fields (1).Value := (Kind => V_Int, Int_Value => 4726);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched, "gt list or no");
+   Rule.Selections (1).Fields (1).Modifiers :=
+     (Count => 2, Items => [1 => Mod_GT, 2 => Mod_All,
+                            others => Mod_None]);
+   Rule.Selections (1).Fields (1).Expected :=
+     (Kind      => E_Int_List,
+      Ints      => [4727, 4726, others => 0],
+      Int_Count => 2);
+   Event.Fields (1).Value := (Kind => V_Int, Int_Value => 4728);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "gt all match");
+   Event.Fields (1).Value := (Kind => V_Int, Int_Value => 4727);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched, "gt all no");
+   Event.Fields (1).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("4728").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "gt text event no");
+
+   --  Illegal comparison shapes fail closed.
+   Rule.Selections (1).Fields (1) :=
+     (Field     => To_Field_Name ("EventID").Value,
+      Modifiers => (Count => 2, Items => [1 => Mod_GT, 2 => Mod_Cased,
+                                          others => Mod_None]),
+      Expected  => (Kind => E_Int, Int_Value => 4727),
+      Views     => (others => <>));
+   Event.Fields (1).Value := (Kind => V_Int, Int_Value => 4728);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_Unsupported_Modifier and then not R.Matched,
+          "gt plus cased unsupported");
+   Rule.Selections (1).Fields (1).Modifiers :=
+     (Count => 2, Items => [1 => Mod_GT, 2 => Mod_Wide,
+                            others => Mod_None]);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_Unsupported_Modifier and then not R.Matched,
+          "gt plus view unsupported");
+   Rule.Selections (1).Fields (1).Modifiers :=
+     (Count => 2, Items => [1 => Mod_GT, 2 => Mod_Contains,
+                            others => Mod_None]);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_Unsupported_Modifier and then not R.Matched,
+          "gt plus matcher unsupported");
+   Rule.Selections (1).Fields (1) :=
+     (Field     => To_Field_Name ("EventID").Value,
+      Modifiers => Empty_Modifiers,
+      Expected  => (Kind => E_Int, Int_Value => 4727),
+      Views     => (others => <>));
+   Rule.Selections (1).Fields (1).Views.Count := 1;
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_Unsupported_Modifier and then not R.Matched,
+          "int with views unsupported");
+
+   --  ---- CIDR ----
+
+   Event.Count := 3;
+   Event.Fields (3).Name := To_Field_Name ("SourceIp").Value;
+   Rule.Selections (1).Field_Count := 2;
+   Rule.Selections (1).Fields (1) :=
+     (Field     => To_Field_Name ("EventID").Value,
+      Modifiers => Empty_Modifiers,
+      Expected  => (Kind => E_Int, Int_Value => 4728),
+      Views     => (others => <>));
+   Event.Fields (1).Value := (Kind => V_Int, Int_Value => 4728);
+   Rule.Selections (1).Fields (2) :=
+     (Field     => To_Field_Name ("SourceIp").Value,
+      Modifiers => (Count => 1, Items => [1 => Mod_CIDR,
+                                          others => Mod_None]),
+      Expected  => (Kind   => E_CIDR,
+                    Net    => IP.Parse_Network ("10.0.0.0/8")),
+      Views     => (others => <>));
+   Event.Fields (3).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("10.1.2.3").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "cidr v4 match");
+   Event.Fields (3).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("11.0.0.1").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched, "cidr v4 no");
+   Event.Fields (3).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("not.an.ip").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "cidr malformed event no");
+
+   --  Host bits mask (lenient): 192.168.1.1/24 covers .99.
+   Rule.Selections (1).Fields (2).Expected :=
+     (Kind => E_CIDR, Net => IP.Parse_Network ("192.168.1.1/24"));
+   Event.Fields (3).Value :=
+     (Kind => V_Text,
+      Text_Value => To_Event_Text ("192.168.1.99").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "cidr masked match");
+   Event.Fields (3).Value :=
+     (Kind => V_Text,
+      Text_Value => To_Event_Text ("192.168.2.99").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "cidr masked no");
+
+   --  Edges: /32 exact, /0 matches everything, bare IP is /32.
+   Rule.Selections (1).Fields (2).Expected :=
+     (Kind => E_CIDR, Net => IP.Parse_Network ("1.2.3.4/32"));
+   Event.Fields (3).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("1.2.3.4").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "cidr /32 match");
+   Event.Fields (3).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("1.2.3.5").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched, "cidr /32 no");
+   Rule.Selections (1).Fields (2).Expected :=
+     (Kind => E_CIDR, Net => IP.Parse_Network ("0.0.0.0/0"));
+   Event.Fields (3).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("203.0.113.7").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "cidr /0 match");
+   Rule.Selections (1).Fields (2).Expected :=
+     (Kind => E_CIDR, Net => IP.Parse_Network ("1.2.3.4"));
+   Event.Fields (3).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("1.2.3.4").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "cidr bare match");
+
+   --  IPv6: full, compressed, and embedded-v4 forms.
+   Rule.Selections (1).Fields (2).Expected :=
+     (Kind => E_CIDR, Net => IP.Parse_Network ("2001:db8::/32"));
+   Event.Fields (3).Value :=
+     (Kind => V_Text,
+      Text_Value => To_Event_Text ("2001:db8::1").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "cidr v6 match");
+   Event.Fields (3).Value :=
+     (Kind => V_Text,
+      Text_Value => To_Event_Text ("2001:db9::1").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched, "cidr v6 no");
+   Event.Fields (3).Value :=
+     (Kind => V_Text,
+      Text_Value => To_Event_Text ("::ffff:10.0.0.1").Value);
+   Rule.Selections (1).Fields (2).Expected :=
+     (Kind => E_CIDR, Net => IP.Parse_Network ("10.0.0.0/8"));
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "cidr v4 mapped");
+   Event.Fields (3).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("::1").Value);
+   Rule.Selections (1).Fields (2).Expected :=
+     (Kind => E_CIDR, Net => IP.Parse_Network ("10.0.0.0/8"));
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "cidr v6 vs v4 rule no");
+   Event.Fields (3).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("10.0.0.1").Value);
+   Rule.Selections (1).Fields (2).Expected :=
+     (Kind => E_CIDR,
+      Net    => IP.Parse_Network ("::ffff:10.0.0.0/104"));
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched,
+          "cidr v4 in v6 range");
+
+   --  Version mismatch the other way, and wrong event type.
+   Rule.Selections (1).Fields (2).Expected :=
+     (Kind => E_CIDR, Net => IP.Parse_Network ("::/0"));
+   Event.Fields (3).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("10.0.0.1").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "cidr v6 /0 all");
+   Event.Fields (3).Value :=
+     (Kind => V_Int, Int_Value => 10);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched,
+          "cidr int event no");
+
+   --  Lists: OR by default, AND with all.
+   Rule.Selections (1).Fields (2) :=
+     (Field     => To_Field_Name ("SourceIp").Value,
+      Modifiers => (Count => 1, Items => [1 => Mod_CIDR,
+                                          others => Mod_None]),
+      Expected  => (Kind      => E_CIDR_List,
+                    Nets      => [1 => IP.Parse_Network ("10.0.0.0/8"),
+                                  2 => IP.Parse_Network ("192.168.0.0/16"),
+                                  others => <>],
+                    Net_Count => 2),
+      Views     => (others => <>));
+   Event.Fields (3).Value :=
+     (Kind => V_Text,
+      Text_Value => To_Event_Text ("192.168.5.5").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "cidr list or");
+   Event.Fields (3).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("172.16.0.1").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched, "cidr list no");
+   Rule.Selections (1).Fields (2).Modifiers :=
+     (Count => 2, Items => [1 => Mod_CIDR, 2 => Mod_All,
+                            others => Mod_None]);
+   Rule.Selections (1).Fields (2).Expected :=
+     (Kind      => E_CIDR_List,
+      Nets      => [1 => IP.Parse_Network ("10.0.0.0/8"),
+                    2 => IP.Parse_Network ("10.1.0.0/16"),
+                    others => <>],
+      Net_Count => 2);
+   Event.Fields (3).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("10.1.2.3").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then R.Matched, "cidr all match");
+   Event.Fields (3).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("10.2.2.3").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_None and then not R.Matched, "cidr all no");
+
+   --  Illegal CIDR shapes fail closed.
+   Rule.Selections (1).Fields (2) :=
+     (Field     => To_Field_Name ("SourceIp").Value,
+      Modifiers => (Count => 2, Items => [1 => Mod_CIDR, 2 => Mod_Wide,
+                                          others => Mod_None]),
+      Expected  => (Kind   => E_CIDR,
+                    Net    => IP.Parse_Network ("10.0.0.0/8")),
+      Views     => (others => <>));
+   Event.Fields (3).Value :=
+     (Kind => V_Text, Text_Value => To_Event_Text ("10.1.2.3").Value);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_Unsupported_Modifier and then not R.Matched,
+          "cidr plus view unsupported");
+   Rule.Selections (1).Fields (2).Modifiers :=
+     (Count => 2, Items => [1 => Mod_CIDR, 2 => Mod_GT,
+                            others => Mod_None]);
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_Unsupported_Modifier and then not R.Matched,
+          "cidr plus comparison unsupported");
+   Rule.Selections (1).Fields (2).Modifiers :=
+     (Count => 1, Items => [1 => Mod_CIDR, others => Mod_None]);
+   Rule.Selections (1).Fields (2).Expected :=
+     (Kind => E_CIDR, Net => (Base   => (Length => 0,
+                                         Bytes  => [others => 0]),
+                              Prefix => 0));
+   R := Evaluate (Rule, Event);
+   Check (R.Error = Error_Unsupported_Modifier and then not R.Matched,
+          "invalid stored net unsupported");
 end Smoke;

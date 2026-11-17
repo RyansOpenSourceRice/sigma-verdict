@@ -1,0 +1,9 @@
+title: EventID greater-than test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID|gt: 4727
+    CommandLine|contains: 'whoami'
+  condition: selection

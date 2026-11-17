@@ -1,0 +1,9 @@
+title: Quoted comparison rejection test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID|gt: '4728'
+    CommandLine|contains: 'whoami'
+  condition: selection

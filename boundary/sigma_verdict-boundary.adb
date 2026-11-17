@@ -1,6 +1,7 @@
 --  Copyright 2026 Ryan
 --  SPDX-License-Identifier: Apache-2.0
 
+with Sigma_Verdict.IP;
 with Sigma_Verdict.Limits;
 with Yaml;
 with Yaml.Parser;
@@ -11,6 +12,8 @@ use Yaml.Parser;
 package body Sigma_Verdict.Boundary with SPARK_Mode => Off is
 
    use E;
+
+package IP renames Sigma_Verdict.IP;
 
    Max_Key_Length   : constant := 256;
    Max_Stack_Depth  : constant := 16;
@@ -474,6 +477,8 @@ package body Sigma_Verdict.Boundary with SPARK_Mode => Off is
       F     : E.Field_Constraint;
       Wants_Pattern : Boolean;
       VT    : E.Modifier_Kind;
+      CT    : E.Modifier_Kind;
+      Has_CIDR : Boolean;
       VW    : E.Single_View;
       Fatal : Boolean;
    begin
@@ -512,6 +517,50 @@ package body Sigma_Verdict.Boundary with SPARK_Mode => Off is
          end if;
       end loop;
       VT := E.View_Token (Mods);
+      CT := E.Comparison_Of (Mods);
+      Has_CIDR := E.Has_Modifier (Mods, E.Mod_CIDR);
+      if CT /= E.Mod_None and then Has_CIDR then
+         --  The loader cannot parse one value two ways; the chain is
+         --  refused here rather than guessed at (core gate agrees).
+         Fail (L, Load_Unsupported_Chain, Loc);
+         return;
+      end if;
+      if CT /= E.Mod_None then
+         --  Comparisons need a bare integer. Quoted text stays text
+         --  in this loader, so a quoted number is malformed here;
+         --  non-numeric and out-of-range magnitudes are malformed
+         --  too (pySigma types compare operators as numeric-only).
+         if not Is_Plain then
+            Fail (L, Load_Bad_Integer, Loc);
+            return;
+         end if;
+         begin
+            F := (Field => Field, Modifiers => Mods,
+                  Expected => (Kind => E.E_Int,
+                               Int_Value => Integer'Value (Text)),
+                  Views => (others => <>));
+            Append_Field (L, Sel, F, Loc);
+         exception
+            when Constraint_Error =>
+               Fail (L, Load_Bad_Integer, Loc);
+         end;
+         return;
+      end if;
+      if Has_CIDR then
+         declare
+            Net : constant IP.IP_Network := IP.Parse_Network (Text);
+         begin
+            if Net.Base.Length = 0 then
+               Fail (L, Load_Bad_Value, Loc);
+               return;
+            end if;
+            F := (Field => Field, Modifiers => Mods,
+                  Expected => (Kind => E.E_CIDR, Net => Net),
+                  Views => (others => <>));
+            Append_Field (L, Sel, F, Loc);
+         end;
+         return;
+      end if;
       F := (Field => Field, Modifiers => Mods,
             Expected => (Kind => E.E_Text,
                          Single => (Length => 0, Data => [others => ' '])),
@@ -634,14 +683,12 @@ package body Sigma_Verdict.Boundary with SPARK_Mode => Off is
       OK    : Boolean;
       FC    : E.Field_Constraint;
       VT    : E.Modifier_Kind;
+      CT    : E.Modifier_Kind;
+      Has_CIDR : Boolean;
       VW    : E.Single_View;
       Fatal : Boolean;
    begin
       F.In_List := False;
-      if F.List_Has_Int and then F.List_Has_Txt then
-         Fail (L, Load_Bad_Integer, Loc);
-         return;
-      end if;
       Parse_Field_Key
         (L, F.Key (1 .. F.Key_Len), Loc, Field, Mods, OK);
       if not OK then
@@ -653,6 +700,31 @@ package body Sigma_Verdict.Boundary with SPARK_Mode => Off is
          return;
       end if;
       VT := E.View_Token (Mods);
+      CT := E.Comparison_Of (Mods);
+      Has_CIDR := E.Has_Modifier (Mods, E.Mod_CIDR);
+      if CT /= E.Mod_None and then Has_CIDR then
+         Fail (L, Load_Unsupported_Chain, Loc);
+         return;
+      end if;
+      if F.List_Has_Int and then F.List_Has_Txt then
+         --  Mixed lists never compare and never form networks.
+         if Has_CIDR then
+            Fail (L, Load_Bad_Value, Loc);
+         else
+            Fail (L, Load_Bad_Integer, Loc);
+         end if;
+         return;
+      end if;
+      if CT /= E.Mod_None and then F.List_Has_Txt then
+         --  Comparison values are bare integers, never text.
+         Fail (L, Load_Bad_Integer, Loc);
+         return;
+      end if;
+      if Has_CIDR and then F.List_Has_Int then
+         --  Networks parse from text; integers are malformed here.
+         Fail (L, Load_Bad_Value, Loc);
+         return;
+      end if;
       if VT /= E.Mod_None and then F.List_Has_Int then
          --  Views derive from text; a view over integers is malformed.
          Fail (L, Load_Bad_Value, Loc);
@@ -668,12 +740,32 @@ package body Sigma_Verdict.Boundary with SPARK_Mode => Off is
          for I in 1 .. F.List_Count loop
             FC.Expected.Ints (I) := F.List_Ints (I);
          end loop;
+      elsif Has_CIDR then
+         FC := (Field => Field, Modifiers => Mods,
+                Expected => (Kind => E.E_CIDR_List,
+                             Nets => [others => <>],
+                             Net_Count => 0),
+                Views => (others => <>));
+         FC.Expected.Net_Count := F.List_Count;
+         for I in 1 .. F.List_Count loop
+            declare
+               Net : constant IP.IP_Network := IP.Parse_Network
+                 (F.List_Items (I).Data (1 .. F.List_Items (I).Length));
+            begin
+               if Net.Base.Length = 0 then
+                  Fail (L, Load_Bad_Value, Loc);
+                  return;
+               end if;
+               FC.Expected.Nets (I) := Net;
+            end;
+         end loop;
       else
          FC := (Field => Field, Modifiers => Mods,
                 Expected => (Kind => E.E_Text_List,
                              Items => [others =>
-                               (Length => 0, Data => [others => ' '])],                             Count => 0),
-                  Views => (others => <>));
+                               (Length => 0, Data => [others => ' '])],
+                             Count => 0),
+                Views => (others => <>));
          FC.Expected.Count := F.List_Count;
          for I in 1 .. F.List_Count loop
             FC.Expected.Items (I) := F.List_Items (I);

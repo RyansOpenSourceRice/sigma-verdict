@@ -20,10 +20,24 @@ YAML text --[boundary, SPARK off]--> Compiled_Rule --[core, SPARK Silver]--> Eva
 
 ## Key decisions
 - Bounded strings everywhere; overflow is `Too_Long`/`Too_Many_*`,
-  never truncation (norm from `pcapng-in-ada`, `shacl-ada`).
+  never truncation (norm from `pcapng-ada`, `shacl-ada`).
 - `contains`/`startswith`/`endswith`: linear scan, ASCII
   case-insensitive fold. No `GNAT.Regpat` (backtracking ReDoS,
   AdaCore Gem #25).
+- Integer comparison uses `Integer`; out-of-range magnitudes never
+  wrap — the boundary rejects them with `Load_Bad_Integer`, and
+  quoted numbers stay text (pySigma types compare operators as
+  numeric-only). Type mismatch at match time is a clean non-match,
+  mirroring the P1a equality path; event data is untrusted input,
+  while a malformed stored rule fails closed as `Unsupported`.
+- CIDR matching is exact prefix math over parsed bytes. Host bits
+  mask leniently (the formal Sigma spec is silent on host-bits-set
+  networks, so operational use wins over pySigma's strict compile
+  rejection — documented divergence); everything ambiguous fails
+  closed: leading-zero octets (octal trap), zone IDs, multiple `::`,
+  bad prefixes. IPv4 sides compare in IPv6 space as `::ffff:0:0/96`,
+  so v4 rules/events mix with v6 exactly; malformed event IPs are
+  clean non-matches.
 - Full `Modifier_Kind` enumeration designed in from day one
   (`https://sigmahq.io/docs/basics/modifiers.html`, pySigma 2.1.0
   taxonomy); Phase 1 evaluates bare/`contains`/`startswith`/`endswith`,
@@ -60,7 +74,28 @@ YAML text --[boundary, SPARK off]--> Compiled_Rule --[core, SPARK Silver]--> Eva
 - No `use` clauses across package boundaries in spec files; explicit
   qualification keeps SPARK flow analysis cheap.
 
-## Non-goals (Phase 1)
+## Library seams
+`Sigma_Verdict.IP` (IP parsing + prefix matching) is built, not
+imported: no Alire crate offers a small, SPARK-provable,
+dependency-free IP parser (`enet` is an embedded IPv4 stack,
+`adare-net`/sockets are runtime-bound and raising, not total), and
+the need is ~200 lines with fail-closed total semantics. The unit
+is non-generic and depends on nothing else in the crate, so a
+future external library replaces two files (`sigma_verdict-ip.ads`
++ `.adb`) without touching core, boundary, tests or proof.
+- Seam rules: Engine stores `IP_Network` values and calls only
+  `Parse_Address`/`Contains`; Boundary calls only `Parse_Network`
+  and maps zero-length results to `Load_Bad_Value`. No dotted-quad,
+  hextet, prefix or masking logic may live outside the seam unit.
+- Replacement contract: total functions, malformed input yields a
+  zero-length network/address (never raises), `Contains` exact over
+  the same 4/16-byte + prefix representation, SPARK Silver-clean so
+  the core proof holds. Graduation to a standalone Alire crate is an
+  explicit non-goal for now (see ROADMAP).
+
+## Non-goals
 `re`/wildcard matching (needs Thompson NFA Pike VM, like
 `shacl-ada`'s `sh:pattern`), `near`/`aggregation`, multi-document
-streams, non-UTF-8 input handling beyond adayaml.
+streams, non-UTF-8 input handling beyond adayaml, graduating
+`Sigma_Verdict.IP` to a standalone Alire crate (explicit future,
+shaped for by the seam).

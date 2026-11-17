@@ -1,0 +1,9 @@
+title: Bad prefix rejection test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4728
+    SourceIp|cidr: '10.0.0.0/33'
+  condition: selection

@@ -1,0 +1,9 @@
+title: Over-range comparison rejection test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID|gt: 9999999999
+    CommandLine|contains: 'whoami'
+  condition: selection
